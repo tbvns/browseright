@@ -11,6 +11,7 @@ Open WebUI tool allowing agents to access a full web browser.
 ### Prerequisites
 *   Node.js (v18 or higher recommended)
 *   npm or yarn
+*   xvfb (Optional) 
 
 ### Installation Steps
 
@@ -30,6 +31,13 @@ Open WebUI tool allowing agents to access a full web browser.
     ```bash
     node ./main.js
     ```
+    if you have any errors saying it was unable to find a suitable screen, or is complaining about running in a headless environment, use:    
+    ```bash
+    xvfb-run node ./main.js
+    ```
+
+4. **Install the tool**
+   Copy `Browseright-OpenWebUI.py` into a new Open-WebUI tool.
 
 > [!CAUTION]
 > Vibe coded and made for my personal usage. Do not use in real production environment. <br /> I won't provide any support on this.
