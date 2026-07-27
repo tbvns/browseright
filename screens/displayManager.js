@@ -8,7 +8,7 @@ import http from 'http';
 const execAsync = promisify(exec);
 
 // ── Configuration ──────────────────────────────────────────────────
-const HOST = process.env.VNC_HOST || '192.168.1.145';   // ← change later to your domain
+const HOST = process.env.VNC_HOST || '192.168.1.145';
 
 // ── MIME map for the static file server ────────────────────────────
 const MIME_TYPES = {
@@ -28,6 +28,8 @@ const MIME_TYPES = {
     '.map':  'application/json',
 };
 
+// ── Non-interactive password storage ───────────────────────────────
+// x11vnc -storepasswd <password> <file>  ← 2 args = non-interactive
 function storeX11VncPassword(passwordFile, password) {
     if (typeof password !== 'string' || password.length === 0) {
         throw new Error('VNC password is required');
@@ -36,20 +38,16 @@ function storeX11VncPassword(passwordFile, password) {
         throw new Error('VNC password cannot contain newline or null characters');
     }
     return new Promise((resolve, reject) => {
-        const child = spawn('x11vnc', ['-storepasswd', passwordFile], {
-            stdio: ['pipe', 'ignore', 'pipe'],
+        const child = spawn('x11vnc', ['-storepasswd', password, passwordFile], {
+            stdio: ['ignore', 'ignore', 'pipe'],
         });
         let stderr = '';
         child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-        child.stdin.on('error', () => {});
         child.on('error', reject);
         child.on('close', (code) => {
             if (code === 0) resolve();
-            else reject(new Error(`x11vnc -storepasswd failed with code ${code}: ${stderr.trim()}`));
+            else reject(new Error(`x11vnc -storepasswd failed (code ${code}): ${stderr.trim()}`));
         });
-        child.stdin.write(`${password}\n`);
-        child.stdin.write(`${password}\n`);
-        child.stdin.end();
     });
 }
 
@@ -93,6 +91,7 @@ class DisplayManager {
         const vncPort = port || (5900 + displayNum);
         let passwordFile = `/tmp/.vncpass_${displayNum}`;
         let authArgs;
+
         try {
             await storeX11VncPassword(passwordFile, password);
             try { fs.chmodSync(passwordFile, 0o600); } catch { /* best effort */ }
@@ -105,6 +104,7 @@ class DisplayManager {
             passwordFile = null;
             authArgs = ['-passwd', password];
         }
+
         const vnc = spawn('x11vnc', [
             '-display', `:${displayNum}`,
             '-forever', '-shared',
@@ -123,7 +123,7 @@ class DisplayManager {
         return vncPort;
     }
 
-    // ── REPLACED: no more --web on websockify ──────────────────────
+    // ── noVNC: websockify (WS proxy) + static HTTP server ──────────
     async startNoVNC(displayNum, vncPort, password, httpPort = null) {
         const novncPort = httpPort || this.nextNoVNCPort++;
 
@@ -131,19 +131,25 @@ class DisplayManager {
             throw new Error(`noVNC not found at ${this.noVNCPath}. Set NOVNC_PATH env var.`);
         }
 
-        // 1) websockify: WebSocket proxy ONLY (no --web)
+        // 1) websockify — WebSocket proxy ONLY, listen on all interfaces
         const websockify = spawn('websockify', [
-            '--target-is-ipv6=false',
+            '--listen', '0.0.0.0',       // ← bind to all interfaces
             String(novncPort),
-            `localhost:${vncPort}`
-        ], { detached: true, stdio: 'ignore' });
+            `127.0.0.1:${vncPort}`       // ← target: local VNC
+        ], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
         websockify.unref();
 
-        // 2) Tiny static file server with correct MIME types
-        //    Serves noVNC on novncPort + 1000  (e.g. 6080 → 7080)
+        // Log websockify stderr for debugging
+        websockify.stderr.on('data', (chunk) => {
+            console.error(`[websockify :${displayNum}] ${chunk.toString().trim()}`);
+        });
+        websockify.stdout.on('data', (chunk) => {
+            console.log(`[websockify :${displayNum}] ${chunk.toString().trim()}`);
+        });
+
+        // 2) Static file server with correct MIME types
         const staticPort = novncPort + 1000;
         const staticServer = http.createServer((req, res) => {
-            // Strip query string
             let urlPath = req.url.split('?')[0];
             if (urlPath === '/') urlPath = '/vnc.html';
 
@@ -174,12 +180,13 @@ class DisplayManager {
         });
 
         const displayInfo = this.activeDisplays.get(displayNum);
-        displayInfo.websockify  = websockify;
+        displayInfo.websockify   = websockify;
         displayInfo.staticServer = staticServer;
-        displayInfo.novncPort   = novncPort;       // WebSocket port
-        displayInfo.staticPort  = staticPort;      // HTTP static port
+        displayInfo.novncPort    = novncPort;
+        displayInfo.staticPort   = staticPort;
 
-        await this._waitForHttpPort(staticPort);
+        // Wait for websockify to actually be listening
+        await this._waitForTcpPort(novncPort);
         return { novncPort, staticPort };
     }
 
@@ -191,13 +198,17 @@ class DisplayManager {
         const vncPort = await this.startVnc(displayNum, password);
         const { novncPort, staticPort } = await this.startNoVNC(displayNum, vncPort, password);
 
-        // ── URL now points to 192.168.1.145 ────────────────────────
-        //    staticPort  → serves the HTML/JS/CSS  (correct MIME)
-        //    novncPort   → WebSocket proxy to VNC
         const novncUrl =
             `http://${HOST}:${staticPort}/vnc.html` +
             `?host=${HOST}&port=${novncPort}` +
             `&password=${encodeURIComponent(password)}&encrypt=0`;
+
+        console.log(`Creating browser on display :${displayNum}`);
+        console.log(`  VNC port:     ${vncPort}`);
+        console.log(`  WS port:      ${novncPort}  (websockify)`);
+        console.log(`  Static port:  ${staticPort} (noVNC UI)`);
+        console.log(`  Password:     ${password}`);
+        console.log(`  URL:          ${novncUrl}`);
 
         return {
             displayNum,
@@ -236,6 +247,33 @@ class DisplayManager {
             } catch { await new Promise(r => setTimeout(r, 100)); }
         }
         throw new Error(`X server :${displayNum} failed to start within ${timeout}ms`);
+    }
+
+    // TCP connect check — more reliable than curl for websockify
+    async _waitForTcpPort(port, timeout = 5000) {
+        const startTime = Date.now();
+        while (Date.now() - startTime < timeout) {
+            const open = await new Promise(async (resolve) => {
+                const sock = new (await import('net')).Socket();
+                sock.setTimeout(300);
+                sock.once('connect', () => {
+                    sock.destroy();
+                    resolve(true);
+                });
+                sock.once('error', () => {
+                    sock.destroy();
+                    resolve(false);
+                });
+                sock.once('timeout', () => {
+                    sock.destroy();
+                    resolve(false);
+                });
+                sock.connect(port, '127.0.0.1');
+            });
+            if (open) return true;
+            await new Promise(r => setTimeout(r, 150));
+        }
+        throw new Error(`TCP port ${port} not listening within ${timeout}ms`);
     }
 
     async _waitForHttpPort(port, timeout = 5000) {
