@@ -1,5 +1,6 @@
 import { chromium } from 'patchright';
 import crypto from 'node:crypto';
+import path from 'node:path';
 import {displayManager} from "../screens/displayManager.js";
 
 const browsers = new Map();
@@ -15,6 +16,8 @@ const IDLE_CLEANUP_DEFAULT_INTERVAL_MS = 60 * 1000;
 const REALISTIC_VIEWPORT = { width: 720, height: 1040 };
 const REALISTIC_LOCALE = 'fr-FR';
 const REALISTIC_TIMEZONE = 'Europe/Paris';
+
+const userDataDir = "./chromeData"
 
 const LAUNCH_ARGS = [
     '--disable-blink-features=AutomationControlled',
@@ -36,184 +39,6 @@ const LAUNCH_ARGS = [
     '--enable-features=NetworkService,NetworkServiceInProcess',
     '--start-maximized',
 ];
-
-const STEALTH_INIT_SCRIPT = `
-(() => {
-    'use strict';
-
-    /* ==================================================================
-     * 1. Remove own properties from the navigator INSTANCE.
-     *
-     * Patchright's Chromium defines these as own properties on the
-     * navigator object, which is detectable:
-     *   Object.getOwnPropertyNames(navigator)
-     *   → ["webdriver","plugins","mimeTypes","languages",
-     *      "deviceMemory","hardwareConcurrency"]
-     *
-     * In a real browser this returns [].  All these properties live on
-     * Navigator.prototype.  Deleting the own properties lets the native
-     * prototype getters take over (Patchright patches webdriver at the
-     * C++ level to return false with a native descriptor).
-     * ================================================================== */
-    const _ownProps = [
-        'webdriver', 'plugins', 'mimeTypes',
-        'languages', 'deviceMemory', 'hardwareConcurrency',
-    ];
-    for (const _p of _ownProps) {
-        try { delete navigator[_p]; } catch (_) {}
-    }
-
-    /* ==================================================================
-     * 2. navigator.plugins → 5 realistic Chrome PDF plugins.
-     *    Redefined on Navigator.prototype (main-thread only API —
-     *    workers don't have plugins, so no inconsistency).
-     * ================================================================== */
-    const _makePlugin = (name, desc, filename, mimes) => {
-        const p = Object.create(Plugin.prototype);
-        Object.defineProperties(p, {
-            name:        { get: () => name,     enumerable: true, configurable: true },
-            description: { get: () => desc,     enumerable: true, configurable: true },
-            filename:    { get: () => filename, enumerable: true, configurable: true },
-            length:      { get: () => mimes.length, enumerable: true, configurable: true },
-        });
-        mimes.forEach((mt, i) => {
-            Object.defineProperty(p, String(i), {
-                get: () => mt, enumerable: true, configurable: true,
-            });
-        });
-        return p;
-    };
-
-    const _pdfMime = Object.create(MimeType.prototype);
-    Object.defineProperties(_pdfMime, {
-        type:        { get: () => 'application/pdf', enumerable: true, configurable: true },
-        suffixes:    { get: () => 'pdf',             enumerable: true, configurable: true },
-        description: { get: () => 'Portable Document Format', enumerable: true, configurable: true },
-    });
-
-    const _pdfxMime = Object.create(MimeType.prototype);
-    Object.defineProperties(_pdfxMime, {
-        type:        { get: () => 'text/pdf', enumerable: true, configurable: true },
-        suffixes:    { get: () => 'pdf',      enumerable: true, configurable: true },
-        description: { get: () => '',         enumerable: true, configurable: true },
-    });
-
-    const _plugins = [
-        _makePlugin('PDF Viewer',               'Portable Document Format', 'internal-pdf-viewer', [_pdfMime]),
-        _makePlugin('Chrome PDF Viewer',        'Portable Document Format', 'internal-pdf-viewer', [_pdfMime]),
-        _makePlugin('Chromium PDF Viewer',      'Portable Document Format', 'internal-pdf-viewer', [_pdfMime]),
-        _makePlugin('Microsoft Edge PDF Viewer','Portable Document Format', 'internal-pdf-viewer', [_pdfMime]),
-        _makePlugin('WebKit built-in PDF',      'Portable Document Format', 'internal-pdf-viewer', [_pdfMime]),
-    ];
-
-    Object.defineProperty(Navigator.prototype, 'plugins', {
-        get: () => {
-            const list = Object.create(PluginArray.prototype);
-            _plugins.forEach((p, i) => {
-                Object.defineProperty(list, String(i), {
-                    get: () => p, enumerable: true, configurable: true,
-                });
-            });
-            Object.defineProperty(list, 'length', {
-                get: () => _plugins.length, enumerable: true, configurable: true,
-            });
-            list.item = (i) => _plugins[i] || null;
-            list.namedItem = (n) => _plugins.find((p) => p.name === n) || null;
-            list.refresh = () => {};
-            list[Symbol.iterator] = function* () { yield* _plugins; };
-            return list;
-        },
-        configurable: true,
-        enumerable: true,
-    });
-
-    /* ==================================================================
-     * 3. navigator.mimeTypes → 2 PDF MIME types (main-thread only).
-     * ================================================================== */
-    const _mimes = [_pdfMime, _pdfxMime];
-    Object.defineProperty(Navigator.prototype, 'mimeTypes', {
-        get: () => {
-            const list = Object.create(MimeTypeArray.prototype);
-            _mimes.forEach((m, i) => {
-                Object.defineProperty(list, String(i), {
-                    get: () => m, enumerable: true, configurable: true,
-                });
-            });
-            Object.defineProperty(list, 'length', {
-                get: () => _mimes.length, enumerable: true, configurable: true,
-            });
-            list.item = (i) => _mimes[i] || null;
-            list.namedItem = (n) => _mimes.find((m) => m.type === n) || null;
-            list[Symbol.iterator] = function* () { yield* _mimes; };
-            return list;
-        },
-        configurable: true,
-        enumerable: true,
-    });
-
-    /* ==================================================================
-     * 4. window.chrome.runtime → realistic stub (main-thread only).
-     * ================================================================== */
-    if (!window.chrome) window.chrome = {};
-    if (!window.chrome.runtime) {
-        window.chrome.runtime = {
-            OnInstalledReason: {
-                CHROME_UPDATE: 'chrome_update',
-                INSTALL: 'install',
-                SHARED_MODULE_UPDATE: 'shared_module_update',
-                UPDATE: 'update',
-            },
-            OnRestartRequiredReason: {
-                APP_UPDATE: 'app_update',
-                OS_UPDATE: 'os_update',
-                PERIODIC: 'periodic',
-            },
-            PlatformArch: {
-                ARM: 'arm', ARM64: 'arm64', MIPS: 'mips',
-                MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64',
-            },
-            PlatformNaclArch: {
-                ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64',
-                X86_32: 'x86-32', X86_64: 'x86-64',
-            },
-            PlatformOs: {
-                ANDROID: 'android', CROS: 'cros', LINUX: 'linux',
-                MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win',
-            },
-            RequestUpdateCheckStatus: {
-                NO_UPDATE: 'no_update',
-                THROTTLED: 'throttled',
-                UPDATE_AVAILABLE: 'update_available',
-            },
-            connect() {
-                return {
-                    onDisconnect: { addListener() {} },
-                    onMessage:    { addListener() {} },
-                    postMessage() {},
-                };
-            },
-            sendMessage() {
-                const cb = arguments[arguments.length - 1];
-                if (typeof cb === 'function') cb();
-            },
-        };
-    }
-
-    /* ==================================================================
-     * 5. window.outerWidth / outerHeight → match screen (main-thread).
-     * ================================================================== */
-    Object.defineProperty(window, 'outerWidth', {
-        get: () => window.screen.width,
-        configurable: true,
-    });
-    Object.defineProperty(window, 'outerHeight', {
-        get: () => window.screen.height,
-        configurable: true,
-    });
-})();
-`;
-
-/* ------------------------- end anti-detection --------------------------- */
 
 function parseMsEnv(name, fallback) {
     const raw = process.env[name];
@@ -350,8 +175,8 @@ function forceCleanupBrowserEntry(entry) {
 async function closeIdleBrowser(entry) {
     if (!entry) return;
     try {
-        if (entry.browser?.isConnected?.()) {
-            await entry.browser.close();
+        if (entry.connected) {
+            await entry.context.close();
         }
     } catch {
         // Best effort only.
@@ -431,25 +256,43 @@ export async function createBrowser(customPassword = undefined) {
     console.log(`  NoVNC port: ${novncPort}`);
     console.log(`  Password: ${password}`);
 
-    const browser = await chromium.launch({
+    const context = await chromium.launchPersistentContext(userDataDir, {
         headless: false,
         args: LAUNCH_ARGS,
         env: {
             ...process.env,
             DISPLAY: `:${displayNum}`
         },
-        executablePath: '/usr/bin/chromium'
+        executablePath: '/usr/bin/chromium',
+
+        viewport: null,
+        locale: REALISTIC_LOCALE,
+        timezoneId: REALISTIC_TIMEZONE,
+        hasTouch: false,
+        isMobile: false,
+        javaScriptEnabled: true,
+        colorScheme: 'light',
     });
+
+    const defaultContextId = `default-${id}`;
+    const contextEntry = {
+        id: defaultContextId,
+        browserId: id,
+        context,
+        pages: new Map(),
+        createdAt: new Date().toISOString(),
+    };
 
     const entry = {
         id,
-        browser,
+        context,
+        connected: true,
+        profileDir,
         displayNum,
         vncPort,
         novncPort,
         password,
-        version: browser.version(),
-        contexts: new Map(),
+        contexts: new Map([[defaultContextId, contextEntry]]),
         pages: new Map(),
         createdAt: new Date().toISOString(),
         lastUsedAt: Date.now(),
@@ -457,9 +300,11 @@ export async function createBrowser(customPassword = undefined) {
     };
 
     browsers.set(id, entry);
+    contexts.set(defaultContextId, contextEntry);
 
-    browser.on('disconnected', async () => {
-        console.log(`Browser ${id} disconnected, cleaning up display :${displayNum}`);
+    context.on('close', async () => {
+        console.log(`Browser ${id} closed, cleaning up display :${displayNum}`);
+        entry.connected = false;
 
         for (const contextEntry of [...entry.contexts.values()]) {
             removeContextEntry(contextEntry);
@@ -474,7 +319,7 @@ export async function createBrowser(customPassword = undefined) {
 
     return {
         id,
-        browser,
+        context,
         displayNum,
         vncPort,
         novncPort,
@@ -492,14 +337,14 @@ export function getBrowserEntry(id) {
 
 export async function closeBrowser(id) {
     const entry = getBrowserEntry(id);
-    await entry.browser.close();
+    await entry.context.close();
     browsers.delete(id);
 }
 
 export async function closeAllBrowsers() {
     const ids = [...browsers.keys()];
     await Promise.allSettled(
-        ids.map((id) => browsers.get(id)?.browser.close())
+        ids.map((id) => browsers.get(id)?.context.close())
     );
     for (const id of ids) browsers.delete(id);
     return { closed: ids.length };
@@ -513,7 +358,7 @@ export function listBrowsers() {
             ? new Date(entry.lastUsedAt).toISOString()
             : null,
         idleTimeoutMs: getBrowserIdleTimeoutMs(entry),
-        connected: entry.browser.isConnected(),
+        connected: entry.connected,
         pages: [...entry.pages.keys()],
     }));
 }
@@ -527,55 +372,21 @@ export function getBrowserInfo(id) {
             ? new Date(entry.lastUsedAt).toISOString()
             : null,
         idleTimeoutMs: getBrowserIdleTimeoutMs(entry),
-        connected: entry.browser.isConnected(),
+        connected: entry.connected,
         pages: [...entry.pages.values()].map(safePageSummary),
     };
 }
 
 /* ----------------------------- context APIs ----------------------------- */
 
-async function createContextInternal(browserId, contextId) {
-    const browserEntry = getBrowserEntry(browserId);
-    const id = contextId || crypto.randomUUID();
-    if (contexts.has(id)) {
-        throw badRequest(`Context with id "${id}" already exists`);
-    }
-
-    const version = browserEntry.version;
-
-    const context = await browserEntry.browser.newContext({
-        viewport: null,
-        locale: REALISTIC_LOCALE,
-        timezoneId: REALISTIC_TIMEZONE,
-        hasTouch: false,
-        isMobile: false,
-        javaScriptEnabled: true,
-        colorScheme: 'light',
-    });
-
-    // Inject stealth patches (main-thread-only APIs)
-    // await context.addInitScript(STEALTH_INIT_SCRIPT);
-
-    const contextEntry = {
-        id,
-        browserId,
-        context,
-        pages: new Map(),
-        createdAt: new Date().toISOString(),
-    };
-    browserEntry.contexts.set(id, contextEntry);
-    contexts.set(id, contextEntry);
-    context.on('close', () => removeContextEntry(contextEntry));
-    return contextEntry;
-}
-
 async function getOrCreateDefaultContext(browserId) {
     const browserEntry = getBrowserEntry(browserId);
     const defaultId = `default-${browserId}`;
-    let contextEntry = browserEntry.contexts.get(defaultId);
-    if (contextEntry) return contextEntry;
-    await createContextInternal(browserId, defaultId);
-    return browserEntry.contexts.get(defaultId);
+    const contextEntry = browserEntry.contexts.get(defaultId);
+    if (!contextEntry) {
+        throw notFound(`Default context for browser "${browserId}" not found`);
+    }
+    return contextEntry;
 }
 
 /* ------------------------------- page APIs ------------------------------ */
