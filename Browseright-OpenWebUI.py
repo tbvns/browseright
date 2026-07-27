@@ -1,7 +1,7 @@
 """
 title: Browseright Hardened Browser Agent
 author: Tbvns
-version: 0.0.3
+version: 0.0.4
 license: MIT
 description: Minimal browser automation tool with isolated VNC/NoVNC access per browser.
 Patchright remains vanilla. All content processing happens server-side outside the browser.
@@ -65,6 +65,7 @@ class Tools:
 
         self._default_browser_id = None
         self._default_page_id = None
+        self._browser_connections = {}
 
     # ------------------------------------------------------------------
     # Internal helpers. These are not agent tools.
@@ -123,7 +124,86 @@ class Tools:
 
         return params
 
+    def _get_browser_connections(self) -> Dict[str, Any]:
+        """
+        Defensive accessor for the browser connection cache.
+
+        Some tool runners may restore or reuse objects in odd ways.
+        This guarantees the attribute exists before use.
+        """
+        if not hasattr(self, "_browser_connections"):
+            self._browser_connections = {}
+        return self._browser_connections
+
+    def _normalize_browser_creation_response(self, resp: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize the browser creation response.
+
+        The Node server currently returns:
+
+        {
+            "success": true,
+            "data": {
+                "browserId": "...",
+                "displayNum": 99,
+                "vncPort": 5999,
+                "novncPort": 6080,
+                "password": "...",
+                "novncUrl": "..."
+            }
+        }
+
+        This helper also accepts older/top-level response shapes.
+        """
+        if not isinstance(resp, dict):
+            return {
+                "error": "Invalid response from browser server",
+                "detail": str(resp),
+            }
+
+        if resp.get("error"):
+            return resp
+
+        data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+
+        browser_id = (
+            data.get("browserId")
+            or data.get("id")
+            or resp.get("browserId")
+            or resp.get("id")
+        )
+
+        if not browser_id:
+            return {
+                "error": "Server did not return browserId",
+                "detail": resp,
+            }
+
+        normalized = {
+            "browserId": browser_id,
+            "displayNum": data.get("displayNum"),
+            "vncPort": data.get("vncPort"),
+            "novncPort": data.get("novncPort"),
+            "password": data.get("password"),
+            "novncUrl": data.get("novncUrl"),
+        }
+
+        self._default_browser_id = browser_id
+        self._get_browser_connections()[browser_id] = normalized
+
+        return normalized
+
     def _ensure_browser(self) -> Any:
+        """
+        Return a usable default browser ID.
+
+        If the current default browser is still connected, reuse it.
+        Otherwise create a new one.
+
+        Returns:
+            str browser_id on success
+            dict error on failure
+        """
         if self._default_browser_id:
             info = self._request("GET", f"/api/browser/{self._default_browser_id}")
 
@@ -135,12 +215,12 @@ class Tools:
                 return self._default_browser_id
 
         resp = self._request("POST", "/api/browser", json_body={})
+        created = self._normalize_browser_creation_response(resp)
 
-        if isinstance(resp, dict) and resp.get("error"):
-            return resp
+        if created.get("error"):
+            return created
 
-        self._default_browser_id = resp.get("id")
-        return self._default_browser_id
+        return created["browserId"]
 
     def _clean_pages(self, pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         cleaned = []
@@ -177,28 +257,14 @@ class Tools:
         }
         """
         resp = self._request("POST", "/api/browser", json_body={})
-
-        if isinstance(resp, dict) and resp.get("error"):
-            return resp
-
-        browser_id = resp.get("id")
-        if browser_id:
-            self._default_browser_id = browser_id
-
-        # Return the full connection info provided by the new endpoint
-        return {
-            "browserId": browser_id,
-            "displayNum": resp.get("displayNum"),
-            "vncPort": resp.get("vncPort"),
-            "novncPort": resp.get("novncPort"),
-            "password": resp.get("password"),
-            "novncUrl": resp.get("novncUrl"),
-        }
+        return self._normalize_browser_creation_response(resp)
 
     def get_browser_info(self, browser_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Get connection details (VNC/NoVNC) for a specific browser.
+        Get information for a specific browser.
         If browser_id is omitted, returns info for the default managed browser.
+
+        This merges live server info with locally cached VNC/NoVNC connection details.
         """
         if not browser_id:
             browser_id = self._default_browser_id
@@ -206,26 +272,46 @@ class Tools:
         if not browser_id:
             return {"error": "No browser ID provided and no default browser set"}
 
-        return self._request("GET", f"/api/browser/{browser_id}")
+        resp = self._request("GET", f"/api/browser/{browser_id}")
+
+        if isinstance(resp, dict) and not resp.get("error"):
+            cached = self._get_browser_connections().get(browser_id, {})
+
+            merged = {
+                **cached,
+                **resp,
+                "browserId": browser_id,
+            }
+
+            return merged
+
+        return resp
 
     def open_page(self, url: str, browser_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Open a URL in a new managed page.
         If browser_id is omitted, the default managed browser is used.
         The agent cannot choose the page ID.
-        Returns: {browserId, pageId, url, title, status}
+
+        Returns:
+        {
+            browserId,
+            pageId,
+            url,
+            title,
+            status
+        }
         """
         if not url:
             return {"error": "url is required"}
 
         if not browser_id:
-            browser_id = self._default_browser_id
+            created = self._ensure_browser()
 
-        if not browser_id:
-            created = self.create_browser()
-            if isinstance(created, dict) and created.get("error"):
+            if isinstance(created, dict):
                 return created
-            browser_id = created.get("browserId")
+
+            browser_id = created
 
         page_resp = self._request(
             "POST",
@@ -262,7 +348,18 @@ class Tools:
     def list_pages(self, browser_id: Optional[str] = None) -> Dict[str, Any]:
         """
         List open pages.
-        Returns: {pages: [{pageId, browserId, url, closed}]}
+
+        Returns:
+        {
+            pages: [
+                {
+                    pageId,
+                    browserId,
+                    url,
+                    closed
+                }
+            ]
+        }
         """
         if not browser_id:
             browser_id = self._default_browser_id
@@ -286,7 +383,13 @@ class Tools:
     ) -> Dict[str, Any]:
         """
         Navigate a page.
-        action: goto | back | forward | reload
+
+        action:
+            goto
+            back
+            forward
+            reload
+
         For goto, url is required.
         """
         if not page_id:
@@ -342,10 +445,10 @@ class Tools:
         Large pages are never returned raw; they are chunked and reranked.
 
         view:
-          - markdown: cleaned markdown
-          - text: plain text
-          - html: cleaned HTML
-          - context: full smart-context object
+            markdown: cleaned markdown
+            text: plain text
+            html: cleaned HTML
+            context: full smart-context object
         """
         if not page_id:
             return {"error": "page_id is required"}
@@ -376,6 +479,7 @@ class Tools:
         """
         Inspect the page surface: title, URL, visible text, links, inputs, buttons,
         and embedded smart context.
+
         Use this before clicking or filling forms.
         """
         if not page_id:
@@ -399,9 +503,9 @@ class Tools:
         Click an element.
 
         Provide one of:
-          - selector: CSS selector
-          - text: visible text
-          - role: ARIA role, optionally with name via text
+            selector: CSS selector
+            text: visible text
+            role: ARIA role, optionally with name via text
         """
         if not page_id:
             return {"error": "page_id is required"}
@@ -442,8 +546,8 @@ class Tools:
         Fill an input or textarea.
 
         Provide one of:
-          - selector: CSS selector
-          - label: label text
+            selector: CSS selector
+            label: label text
         """
         if not page_id:
             return {"error": "page_id is required"}
@@ -475,7 +579,9 @@ class Tools:
     ) -> Dict[str, Any]:
         """
         Press a keyboard key, for example Enter, Tab, ArrowDown.
-        If selector is provided, press on that element; otherwise press on the page.
+
+        If selector is provided, press on that element.
+        Otherwise press on the page.
         """
         if not page_id:
             return {"error": "page_id is required"}
@@ -504,8 +610,8 @@ class Tools:
         Select option values in a <select> element.
 
         Provide one of:
-          - selector: CSS selector
-          - label: label text
+            selector: CSS selector
+            label: label text
         """
         if not page_id:
             return {"error": "page_id is required"}
@@ -543,9 +649,9 @@ class Tools:
     ) -> Dict[str, Any]:
         """
         Wait for one of:
-          - selector
-          - url
-          - load_state: load | domcontentloaded | networkidle
+            selector
+            url
+            load_state: load | domcontentloaded | networkidle
 
         If none are provided, waits for network idle.
         """
@@ -591,14 +697,17 @@ class Tools:
 
         Example:
         {
-          "title": {"selector": "h1", "text": true},
-          "links": {
-            "selector": "a",
-            "all": true,
-            "limit": 20,
-            "text": true,
-            "attributes": ["href"]
-          }
+            "title": {
+                "selector": "h1",
+                "text": true
+            },
+            "links": {
+                "selector": "a",
+                "all": true,
+                "limit": 20,
+                "text": true,
+                "attributes": ["href"]
+            }
         }
         """
         if not page_id:
@@ -608,7 +717,9 @@ class Tools:
             return {"error": "spec must be an object"}
 
         return self._request(
-            "POST", f"/api/page/{page_id}/extract", json_body={"spec": spec}
+            "POST",
+            f"/api/page/{page_id}/extract",
+            json_body={"spec": spec},
         )
 
     def close_page(self, page_id: str) -> Dict[str, Any]:
@@ -627,7 +738,8 @@ class Tools:
 
     def close_browser(self, browser_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Close a browser. If browser_id is omitted, closes the default managed browser.
+        Close a browser.
+        If browser_id is omitted, closes the default managed browser.
         """
         if not browser_id:
             browser_id = self._default_browser_id
@@ -636,6 +748,8 @@ class Tools:
             return {"error": "No browser to close"}
 
         resp = self._request("DELETE", f"/api/browser/{browser_id}")
+
+        self._get_browser_connections().pop(browser_id, None)
 
         if self._default_browser_id == browser_id:
             self._default_browser_id = None
