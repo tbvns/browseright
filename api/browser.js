@@ -480,7 +480,7 @@ export async function createBrowser(customPassword = undefined) {
     const id = crypto.randomUUID();
 
     const { displayNum, vncPort, novncPort, password, novncUrl } =
-        await displayManager.createDisplay('720x1080x24', customPassword);
+        await displayManager.createDisplay('740x1080x24', customPassword);
 
     console.log(`Creating browser ${id} on display :${displayNum}`);
     console.log(`  VNC port: ${vncPort}`);
