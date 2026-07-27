@@ -24,7 +24,7 @@ Open WebUI tool allowing agents to access a full web browser.
 2.  **Install dependencies**
     ```bash
     npm install
-    npx playwright install
+    npx patchright install
     ```
 
 3.  **Run the server**
