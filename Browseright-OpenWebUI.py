@@ -1,5 +1,5 @@
 """
-title: Browseright Hardened Browser Agent
+title: Browseright: Browser Agent
 author: Tbvns
 version: 0.0.2
 license: MIT
