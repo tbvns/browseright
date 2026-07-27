@@ -1090,10 +1090,15 @@ export async function getMarkdown(pageId) {
                         return `${children}\n`;
                     case 'A':
                         return `[${children}](${el.getAttribute('href') || ''})`;
-                    case 'IMG':
-                        return `![${el.getAttribute('alt') || ''}](${
-                            el.getAttribute('src') || ''
-                        })`;
+                    case 'IMG': {
+                        const alt = el.getAttribute('alt') || '';
+                        const src = el.getAttribute('src') || '';
+                        if (src.startsWith('data:')) {
+                            return alt ? `![${alt}]()` : '';
+                        }
+
+                        return `![${alt}](${src})`;
+                    }
                     case 'BUTTON':
                     case 'LABEL':
                     case 'SPAN':

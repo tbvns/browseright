@@ -558,10 +558,14 @@ function htmlToText(html) {
 
 /* --------------------------- HTML simplifier ---------------------------- */
 
+const DATA_URI_ATTR_RE = /=("|')data:[^"']*\1/gi;
+
 export function simplifyHtml(html, options = {}) {
     if (!html) return '';
 
-    const $ = load(html, { decodeEntities: false });
+    const html_ = String(html).replace(DATA_URI_ATTR_RE, '=$1$1');
+
+    const $ = load(html_, { decodeEntities: false });
 
     // Remove comments everywhere.
     const removeComments = (root) => {
@@ -1494,6 +1498,43 @@ export default embeddedBrowser;
 
 /* ------------------------------- routes --------------------------------- */
 
+const RAW_ENDPOINTS_DISABLED = new Set([
+    'GET /api/page/:pageId/content',
+    'GET /api/page/:pageId/markdown',
+    'GET /api/page/:pageId/text',
+    'GET /api/page/:pageId/snapshot',
+]);
+
+const ROUTE_METHODS = ['get', 'post', 'put', 'delete', 'patch', 'all'];
+
+function withDisabledRoutes(app, disabled) {
+    const wrapped = Object.create(app);
+
+    for (const method of ROUTE_METHODS) {
+        if (typeof app[method] !== 'function') continue;
+
+        wrapped[method] = function (routePath, ...handlers) {
+            const key = `${method.toUpperCase()} ${routePath}`;
+
+            if (disabled.has(key)) {
+                return app[method](routePath, (req, res) => {
+                    res.status(404).json({
+                        error: 'Not found',
+                        detail:
+                            'This endpoint only ever served unprocessed content and has ' +
+                            'been permanently disabled here. Use the embedded equivalent ' +
+                            '(same path, cleaned + chunked + reranked) instead.',
+                    });
+                });
+            }
+
+            return app[method](routePath, ...handlers);
+        };
+    }
+
+    return wrapped;
+}
+
 export function setupEmbeddedBrowserRoutes(app) {
     /*
       Register wrapped endpoints first.
@@ -1576,8 +1617,7 @@ export function setupEmbeddedBrowserRoutes(app) {
         })
     );
 
-    // Mount all original browser routes after the wrapped ones.
-    setupOriginalBrowserRoutes(app);
+    setupOriginalBrowserRoutes(withDisabledRoutes(app, RAW_ENDPOINTS_DISABLED));
 }
 
 export const setupBrowserRoutes = setupEmbeddedBrowserRoutes;
