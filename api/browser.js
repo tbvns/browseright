@@ -18,7 +18,7 @@ const REALISTIC_VIEWPORT = { width: 1920, height: 1080 };
 
 const REALISTIC_LOCALE = 'fr-FR';
 
-const REALISTIC_TIMEZONE = 'Europe/PAris';
+const REALISTIC_TIMEZONE = 'Europe/Paris';
 
 const LAUNCH_ARGS = [
     '--disable-blink-features=AutomationControlled',
