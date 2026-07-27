@@ -553,7 +553,7 @@ async function createContextInternal(browserId, contextId) {
     });
 
     // Inject stealth patches (main-thread-only APIs)
-    await context.addInitScript(STEALTH_INIT_SCRIPT);
+    // await context.addInitScript(STEALTH_INIT_SCRIPT);
 
     const contextEntry = {
         id,
