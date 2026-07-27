@@ -1,6 +1,6 @@
 """
 title: Browseright Hardened Browser Agent
-author: Hardened
+author: Tbvns
 version: 0.0.2
 license: MIT
 description: Minimal browser automation tool. Patchright remains vanilla. All content
