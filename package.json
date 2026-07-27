@@ -16,6 +16,7 @@
     "express": "^5.2.1",
     "node-addon-api": "^8.9.0",
     "node-gyp": "^13.0.1",
-    "patchright": "^1.61.1"
+    "patchright": "^1.61.1",
+    "ws": "^8.21.1"
   }
 }

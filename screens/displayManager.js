@@ -1,16 +1,18 @@
-import { exec, spawn, execFile } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import http from 'http';
+import net from 'net';
+import { WebSocketServer } from 'ws';
 
 const execAsync = promisify(exec);
 
 // ── Configuration ──────────────────────────────────────────────────
-const HOST = process.env.VNC_HOST || '192.168.1.145';
+const HOST = process.env.VNC_HOST || '0.0.0.0';
 
-// ── MIME map for the static file server ────────────────────────────
+// ── MIME types ─────────────────────────────────────────────────────
 const MIME_TYPES = {
     '.html': 'text/html',
     '.js':   'application/javascript',
@@ -28,8 +30,7 @@ const MIME_TYPES = {
     '.map':  'application/json',
 };
 
-// ── Non-interactive password storage ───────────────────────────────
-// x11vnc -storepasswd <password> <file>  ← 2 args = non-interactive
+// ── Non-interactive x11vnc password (2-arg form, no TTY needed) ───
 function storeX11VncPassword(passwordFile, password) {
     if (typeof password !== 'string' || password.length === 0) {
         throw new Error('VNC password is required');
@@ -51,6 +52,91 @@ function storeX11VncPassword(passwordFile, password) {
     });
 }
 
+// ── WebSocket-to-TCP proxy (replaces websockify) ───────────────────
+function createWsProxy(port, targetHost, targetPort) {
+    const server = http.createServer((req, res) => {
+        res.writeHead(400);
+        res.end('This port serves WebSocket connections only.');
+    });
+
+    const wss = new WebSocketServer({ server, path: '/websockify' });
+
+    wss.on('connection', (ws, req) => {
+        console.log(`[ws-proxy] Client connected from ${req.socket.remoteAddress}`);
+
+        const tcp = net.connect(targetPort, targetHost, () => {
+            console.log(`[ws-proxy] Connected to VNC at ${targetHost}:${targetPort}`);
+        });
+
+        // WebSocket → TCP
+        ws.on('message', (data, isBinary) => {
+            if (tcp.writable) tcp.write(data);
+        });
+
+        // TCP → WebSocket
+        tcp.on('data', (data) => {
+            if (ws.readyState === ws.OPEN) {
+                ws.send(data, { binary: true });
+            }
+        });
+
+        // Cleanup
+        ws.on('close', () => {
+            console.log(`[ws-proxy] Client disconnected`);
+            tcp.destroy();
+        });
+        ws.on('error', (err) => {
+            console.error(`[ws-proxy] WS error: ${err.message}`);
+            tcp.destroy();
+        });
+        tcp.on('close', () => {
+            if (ws.readyState === ws.OPEN) ws.close();
+        });
+        tcp.on('error', (err) => {
+            console.error(`[ws-proxy] TCP error: ${err.message}`);
+            if (ws.readyState === ws.OPEN) ws.close();
+        });
+    });
+
+    return new Promise((resolve, reject) => {
+        server.listen(port, '0.0.0.0', () => {
+            console.log(`[ws-proxy] Listening on 0.0.0.0:${port} → ${targetHost}:${targetPort}`);
+            resolve({ server, wss });
+        });
+        server.on('error', reject);
+    });
+}
+
+// ── Static file server with correct MIME types ─────────────────────
+function createStaticServer(port, rootDir) {
+    const server = http.createServer((req, res) => {
+        let urlPath = req.url.split('?')[0];
+        if (urlPath === '/') urlPath = '/vnc.html';
+
+        const filePath = path.join(rootDir, path.normalize(urlPath));
+        if (!filePath.startsWith(path.resolve(rootDir))) {
+            res.writeHead(403); res.end('Forbidden'); return;
+        }
+
+        fs.readFile(filePath, (err, data) => {
+            if (err) { res.writeHead(404); res.end('Not found'); return; }
+            const ext  = path.extname(filePath).toLowerCase();
+            const mime = MIME_TYPES[ext] || 'application/octet-stream';
+            res.writeHead(200, {
+                'Content-Type': mime,
+                'Access-Control-Allow-Origin': '*',
+            });
+            res.end(data);
+        });
+    });
+
+    return new Promise((resolve, reject) => {
+        server.listen(port, '0.0.0.0', () => resolve(server));
+        server.on('error', reject);
+    });
+}
+
+// ── Display Manager ────────────────────────────────────────────────
 class DisplayManager {
     constructor() {
         this.nextDisplay    = 99;
@@ -123,64 +209,28 @@ class DisplayManager {
         return vncPort;
     }
 
+    // ── No more websockify binary — pure Node.js proxy ─────────────
     async startNoVNC(displayNum, vncPort, password, httpPort = null) {
-        const novncPort = httpPort || this.nextNoVNCPort++;
+        const novncPort  = httpPort || this.nextNoVNCPort++;
+        const staticPort = novncPort + 1000;
 
         if (!fs.existsSync(this.noVNCPath)) {
             throw new Error(`noVNC not found at ${this.noVNCPath}. Set NOVNC_PATH env var.`);
         }
 
-        const websockify = spawn('websockify', [
-            `0.0.0.0:${novncPort}`,
-            `127.0.0.1:${vncPort}`
-        ], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-        websockify.unref();
-        websockify.unref();
+        // 1) WebSocket-to-TCP proxy (replaces websockify)
+        const { server: wsServer, wss } = await createWsProxy(novncPort, '127.0.0.1', vncPort);
 
-        websockify.stderr.on('data', (chunk) => {
-            console.error(`[websockify :${displayNum}] ${chunk.toString().trim()}`);
-        });
-        websockify.stdout.on('data', (chunk) => {
-            console.log(`[websockify :${displayNum}] ${chunk.toString().trim()}`);
-        });
-
-        const staticPort = novncPort + 1000;
-        const staticServer = http.createServer((req, res) => {
-            let urlPath = req.url.split('?')[0];
-            if (urlPath === '/') urlPath = '/vnc.html';
-
-            const filePath = path.join(this.noVNCPath, path.normalize(urlPath));
-
-            if (!filePath.startsWith(path.resolve(this.noVNCPath))) {
-                res.writeHead(403); res.end('Forbidden'); return;
-            }
-
-            fs.readFile(filePath, (err, data) => {
-                if (err) {
-                    res.writeHead(404); res.end('Not found'); return;
-                }
-                const ext  = path.extname(filePath).toLowerCase();
-                const mime = MIME_TYPES[ext] || 'application/octet-stream';
-                res.writeHead(200, {
-                    'Content-Type': mime,
-                    'Access-Control-Allow-Origin': '*',
-                });
-                res.end(data);
-            });
-        });
-
-        await new Promise((resolve, reject) => {
-            staticServer.listen(staticPort, '0.0.0.0', resolve);
-            staticServer.on('error', reject);
-        });
+        // 2) Static file server (replaces websockify --web)
+        const staticServer = await createStaticServer(staticPort, this.noVNCPath);
 
         const displayInfo = this.activeDisplays.get(displayNum);
-        displayInfo.websockify   = websockify;
+        displayInfo.wsServer     = wsServer;
+        displayInfo.wss          = wss;
         displayInfo.staticServer = staticServer;
         displayInfo.novncPort    = novncPort;
         displayInfo.staticPort   = staticPort;
 
-        await this._waitForTcpPort(novncPort);
         return { novncPort, staticPort };
     }
 
@@ -198,20 +248,15 @@ class DisplayManager {
             `&password=${encodeURIComponent(password)}&encrypt=0`;
 
         console.log(`Creating browser on display :${displayNum}`);
-        console.log(`  VNC port:     ${vncPort}`);
-        console.log(`  WS port:      ${novncPort}  (websockify)`);
-        console.log(`  Static port:  ${staticPort} (noVNC UI)`);
-        console.log(`  Password:     ${password}`);
-        console.log(`  URL:          ${novncUrl}`);
+        console.log(`  VNC port:    ${vncPort}`);
+        console.log(`  WS port:     ${novncPort}  (Node ws-proxy)`);
+        console.log(`  Static port: ${staticPort}  (noVNC UI)`);
+        console.log(`  Password:    ${password}`);
+        console.log(`  URL:         ${novncUrl}`);
 
         return {
-            displayNum,
-            vncPort,
-            novncPort,
-            staticPort,
-            password,
-            displayEnv: `:${displayNum}`,
-            novncUrl,
+            displayNum, vncPort, novncPort, staticPort,
+            password, displayEnv: `:${displayNum}`, novncUrl,
         };
     }
 
@@ -219,8 +264,9 @@ class DisplayManager {
         const displayInfo = this.activeDisplays.get(displayNum);
         if (!displayInfo) return;
         try {
+            if (displayInfo.wss)          displayInfo.wss.close();
+            if (displayInfo.wsServer)     displayInfo.wsServer.close();
             if (displayInfo.staticServer) displayInfo.staticServer.close();
-            if (displayInfo.websockify)   displayInfo.websockify.kill('SIGTERM');
             if (displayInfo.vnc)          displayInfo.vnc.kill('SIGTERM');
             if (displayInfo.xvfb)         displayInfo.xvfb.kill('SIGTERM');
             if (displayInfo.passwordFile && fs.existsSync(displayInfo.passwordFile)) {
@@ -241,43 +287,6 @@ class DisplayManager {
             } catch { await new Promise(r => setTimeout(r, 100)); }
         }
         throw new Error(`X server :${displayNum} failed to start within ${timeout}ms`);
-    }
-
-    async _waitForTcpPort(port, timeout = 5000) {
-        const startTime = Date.now();
-        while (Date.now() - startTime < timeout) {
-            const open = await new Promise(async (resolve) => {
-                const sock = new (await import('net')).Socket();
-                sock.setTimeout(300);
-                sock.once('connect', () => {
-                    sock.destroy();
-                    resolve(true);
-                });
-                sock.once('error', () => {
-                    sock.destroy();
-                    resolve(false);
-                });
-                sock.once('timeout', () => {
-                    sock.destroy();
-                    resolve(false);
-                });
-                sock.connect(port, '127.0.0.1');
-            });
-            if (open) return true;
-            await new Promise(r => setTimeout(r, 150));
-        }
-        throw new Error(`TCP port ${port} not listening within ${timeout}ms`);
-    }
-
-    async _waitForHttpPort(port, timeout = 5000) {
-        const startTime = Date.now();
-        while (Date.now() - startTime < timeout) {
-            try {
-                await execAsync(`curl -s -o /dev/null http://localhost:${port}/ > /dev/null 2>&1`);
-                return true;
-            } catch { await new Promise(r => setTimeout(r, 100)); }
-        }
-        throw new Error(`HTTP port ${port} failed to respond within ${timeout}ms`);
     }
 
     async _waitForPort(port, timeout = 5000) {
