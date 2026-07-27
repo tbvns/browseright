@@ -184,7 +184,7 @@ class DisplayManager {
         return displayNum;
     }
 
-    async startXvfb(displayNum, resolution = '1920x1080x24') {
+    async startXvfb(displayNum, resolution = '720x1080x24') {
         await this._ensureOpenboxConfig();
 
         const xvfb = spawn('Xvfb', [
