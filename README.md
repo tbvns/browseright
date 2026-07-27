@@ -7,4 +7,4 @@ Open WebUI tool allowing agents to access a full web browser.
 
 > [!NOTE]
 > Feel free to open pull requests or fork the tool for your need. <br />
-> Fully automated AI pull requests are allowed on this repo, so go wild.
+> Vibe coding is allowed in pull requests for this repo, so go wild.
