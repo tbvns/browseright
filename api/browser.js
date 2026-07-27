@@ -34,8 +34,6 @@ const LAUNCH_ARGS = [
     '--disable-sync',
     '--metrics-recording-only',
     '--enable-features=NetworkService,NetworkServiceInProcess',
-    '--window-size=1920,1080',
-    '--start-maximized',
 ];
 
 const STEALTH_INIT_SCRIPT = `
