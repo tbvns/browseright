@@ -543,8 +543,6 @@ async function createContextInternal(browserId, contextId) {
     const version = browserEntry.version;
 
     const context = await browserEntry.browser.newContext({
-        viewport: REALISTIC_VIEWPORT,
-        screen: { width: 700, height: 1040 },
         locale: REALISTIC_LOCALE,
         timezoneId: REALISTIC_TIMEZONE,
         deviceScaleFactor: 1,
