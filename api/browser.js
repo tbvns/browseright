@@ -939,7 +939,7 @@ export default function setupBrowserRoutes(app) {
                 novncPort,
                 password,
                 novncUrl
-            } = await createBrowser(customPassword);
+            } = await createBrowser();
 
             res.json({
                 success: true,
