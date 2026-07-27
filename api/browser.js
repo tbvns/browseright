@@ -1,5 +1,6 @@
 import { chromium } from 'patchright';
 import crypto from 'node:crypto';
+import {displayManager} from "../screens/displayManager.js";
 
 const browsers = new Map();
 const contexts = new Map();
@@ -478,37 +479,66 @@ async function withPage(pageId, fn) {
 
 /* ----------------------------- browser APIs ----------------------------- */
 
-export async function createBrowser() {
+export async function createBrowser(customPassword = null) {
     const id = crypto.randomUUID();
+
+    const { displayNum, vncPort, novncPort, password, novncUrl } =
+        await displayManager.createDisplay('1920x1080x24', customPassword);
+
+    console.log(`Creating browser ${id} on display :${displayNum}`);
+    console.log(`  VNC port: ${vncPort}`);
+    console.log(`  NoVNC port: ${novncPort}`);
+    console.log(`  Password: ${password}`);
 
     const browser = await chromium.launch({
         headless: false,
         args: LAUNCH_ARGS,
+        env: {
+            ...process.env,
+            DISPLAY: `:${displayNum}`
+        }
     });
 
     const entry = {
         id,
         browser,
-        version: browser.version(),   // e.g. "149.0.7827.55"
+        displayNum,
+        vncPort,
+        novncPort,
+        password,
+        version: browser.version(),
         contexts: new Map(),
         pages: new Map(),
         createdAt: new Date().toISOString(),
         lastUsedAt: Date.now(),
         idleTimeoutMs: toIdleTimeout(undefined),
     };
+
     browsers.set(id, entry);
 
-    browser.on('disconnected', () => {
+    browser.on('disconnected', async () => {
+        console.log(`Browser ${id} disconnected, cleaning up display :${displayNum}`);
+
         for (const contextEntry of [...entry.contexts.values()]) {
             removeContextEntry(contextEntry);
         }
         for (const pageEntry of [...entry.pages.values()]) {
             removePageEntry(pageEntry);
         }
+
         browsers.delete(id);
+        await displayManager.cleanupDisplay(displayNum);
     });
 
-    return { id, browser };
+    return {
+        id,
+        browser,
+        displayNum,
+        vncPort,
+        novncPort,
+        password,
+        novncUrl
+    };
 }
 
 export function getBrowserEntry(id) {
@@ -901,8 +931,37 @@ export default function setupBrowserRoutes(app) {
     app.post(
         '/api/browser',
         asyncRoute(async (_req, res) => {
-            const { id: browserId } = await createBrowser();
-            res.json({ id: browserId });
+            const {
+                id,
+                browser,
+                displayNum,
+                vncPort,
+                novncPort,
+                password,
+                novncUrl
+            } = await createBrowser(customPassword);
+
+            res.json({
+                success: true,
+                data: {
+                    browserId: id,
+                    displayNum: displayNum,
+                    vncPort: vncPort,
+                    novncPort: novncPort,
+                    password: password,
+                    novncUrl: novncUrl,
+                    vncConnection: {
+                        host: 'localhost',
+                        port: vncPort,
+                        password: password
+                    },
+                    novncConnection: {
+                        url: novncUrl,
+                        port: novncPort,
+                        password: password
+                    },
+                }
+            });
         })
     );
 

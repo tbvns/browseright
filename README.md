@@ -11,7 +11,7 @@ Open WebUI tool allowing agents to access a full web browser.
 ### Prerequisites
 *   Node.js (v18 or higher recommended)
 *   npm or yarn
-*   xvfb (Optional) 
+*   xvfb, x11vnc
 
 ### Installation Steps
 
@@ -25,6 +25,7 @@ Open WebUI tool allowing agents to access a full web browser.
     ```bash
     npm install
     npx patchright install
+    chmod +x ./setup-novnc.sh && ./setup-novnc.sh
     ```
 
 3.  **Run the server**
