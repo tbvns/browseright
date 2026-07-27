@@ -394,63 +394,6 @@ async function navResult(page) {
     };
 }
 
-/* -----------------------------------------------------------------------
- * CDP-level user-agent override.
- *
- * Sets userAgentMetadata at the ENGINE level via DevTools Protocol.
- * Unlike JS-level patches, this propagates to Web Workers, iframes,
- * service workers, and HTTP headers — eliminating the
- * main-thread-vs-worker inconsistency that deviceandbrowserinfo detects.
- *
- * This is what makes navigator.userAgentData.brands show
- * "Google Chrome" instead of just "Chromium", consistently everywhere.
- * ----------------------------------------------------------------------- */
-async function applyCDPUserAgent(page, browserEntry) {
-    try {
-        const version = browserEntry.version;          // e.g. "149.0.7827.55"
-        const major = version.split('.')[0];           // e.g. "149"
-        const ua =
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-            'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-            'Chrome/' + version + ' Safari/537.36';
-
-        const client = await page.context().newCDPSession(page);
-
-        await client.send('Emulation.setUserAgentOverride', {
-            userAgent: ua,
-            acceptLanguage: 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-            platform: 'Win32',
-            userAgentMetadata: {
-                brands: [
-                    { brand: 'Google Chrome', version: major },
-                    { brand: 'Chromium',      version: major },
-                    { brand: 'Not_A Brand',   version: '24' },
-                ],
-                fullVersionList: [
-                    { brand: 'Google Chrome', version: version },
-                    { brand: 'Chromium',      version: version },
-                    { brand: 'Not_A Brand',   version: '24.0.0.0' },
-                ],
-                platform: 'Windows',
-                platformVersion: '15.0.0',
-                architecture: 'x86',
-                bitness: '64',
-                model: '',
-                mobile: false,
-                uaFullVersion: version,
-                wow64: false,
-            },
-        });
-
-        // Clean up CDP session when page closes
-        page.on('close', () => {
-            client.detach().catch(() => {});
-        });
-    } catch {
-        // CDP not available — context-level userAgent still applies
-    }
-}
-
 function attachPage(pageId, page, browserId, contextId) {
     if (pages.has(pageId)) {
         throw badRequest(`Page id "${pageId}" already exists`);
@@ -598,13 +541,8 @@ async function createContextInternal(browserId, contextId) {
     }
 
     const version = browserEntry.version;
-    const ua =
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-        'Chrome/' + version + ' Safari/537.36';
 
     const context = await browserEntry.browser.newContext({
-        userAgent: ua,
         viewport: REALISTIC_VIEWPORT,
         screen: { width: 700, height: 1040 },
         locale: REALISTIC_LOCALE,
@@ -649,9 +587,6 @@ export async function newPage(browserId) {
     const page = await contextEntry.context.newPage();
     const pageId = crypto.randomUUID();
     attachPage(pageId, page, browserId, contextEntry.id);
-
-    // Engine-level userAgentData override (propagates to workers)
-    await applyCDPUserAgent(page, browserEntry);
 
     return { id: pageId };
 }
