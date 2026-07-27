@@ -287,11 +287,13 @@ class DisplayManager {
     async cleanupDisplay(displayNum) {
         const displayInfo = this.activeDisplays.get(displayNum);
         if (!displayInfo) return;
+
         try {
             if (displayInfo.wss)          displayInfo.wss.close();
             if (displayInfo.wsServer)     displayInfo.wsServer.close();
             if (displayInfo.staticServer) displayInfo.staticServer.close();
             if (displayInfo.vnc)          displayInfo.vnc.kill('SIGTERM');
+            if (displayInfo.openbox)      displayInfo.openbox.kill('SIGTERM');  // <-- Add this line
             if (displayInfo.xvfb)         displayInfo.xvfb.kill('SIGTERM');
             if (displayInfo.passwordFile && fs.existsSync(displayInfo.passwordFile)) {
                 fs.unlinkSync(displayInfo.passwordFile);
@@ -299,6 +301,7 @@ class DisplayManager {
         } catch (e) {
             console.error(`Error cleaning up display :${displayNum}`, e);
         }
+
         this.activeDisplays.delete(displayNum);
     }
 
