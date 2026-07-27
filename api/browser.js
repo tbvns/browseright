@@ -482,7 +482,7 @@ export async function createBrowser() {
     const id = crypto.randomUUID();
 
     const browser = await chromium.launch({
-        headless: true,
+        headless: false,
         args: LAUNCH_ARGS,
     });
 
