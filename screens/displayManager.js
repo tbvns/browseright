@@ -146,6 +146,27 @@ class DisplayManager {
         this.defaultPasswordLength = parseInt(process.env.VNC_PASSWORD_LENGTH) || 16;
     }
 
+    async _ensureOpenboxConfig() {
+        const home = process.env.HOME || '/root';
+        const configDir = path.join(home, '.config', 'openbox');
+        if (!fs.existsSync(configDir)) {
+            fs.mkdirSync(configDir, { recursive: true });
+        }
+        const rcPath = path.join(configDir, 'rc.xml');
+        if (!fs.existsSync(rcPath)) {
+            // A minimal rc.xml to prevent Openbox from failing on startup
+            const defaultRc = `<?xml version="1.0"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <resistance><strength>10</strength></resistance>
+  <focus><focusNew>yes</focusNew></focus>
+  <placement><policy>Smart</policy></placement>
+  <theme><name>Clearlooks</name></theme>
+  <desktops><number>1</number></desktops>
+</openbox_config>`;
+            fs.writeFileSync(rcPath, defaultRc);
+        }
+    }
+
     generatePassword(length = 8) {
         const effectiveLength = Math.min(Math.max(Number(length) || 8, 8), 8);
         const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
@@ -164,12 +185,31 @@ class DisplayManager {
     }
 
     async startXvfb(displayNum, resolution = '1920x1080x24') {
+        await this._ensureOpenboxConfig();
+
         const xvfb = spawn('Xvfb', [
             `:${displayNum}`, '-screen', '0', resolution, '-ac', '-nolisten', 'tcp'
         ], { detached: true, stdio: 'ignore' });
         xvfb.unref();
+
         await this._waitForXServer(displayNum);
-        this.activeDisplays.set(displayNum, { xvfb });
+
+        const home = process.env.HOME || '/root';
+        const openbox = spawn('openbox', [], {
+            detached: true,
+            stdio: 'ignore',
+            env: {
+                ...process.env,
+                DISPLAY: `:${displayNum}`,
+                XDG_CONFIG_HOME: path.join(home, '.config')
+            }
+        });
+        openbox.unref();
+
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        this.activeDisplays.set(displayNum, { xvfb, openbox });
+        console.log(`[displayManager] Xvfb and Openbox started on display :${displayNum}`);
         return displayNum;
     }
 
