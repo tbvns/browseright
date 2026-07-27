@@ -1,6 +1,7 @@
 import { chromium } from 'patchright';
 import crypto from 'node:crypto';
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import {displayManager} from "../screens/displayManager.js";
 
 const browsers = new Map();
@@ -18,6 +19,68 @@ const REALISTIC_LOCALE = 'fr-FR';
 const REALISTIC_TIMEZONE = 'Europe/Paris';
 
 const userDataDir = "./chromeData"
+
+// Chrome only allows ONE live process per profile dir (SingletonLock), so
+// concurrent windows each need their own profile directory. Instead of a
+// fresh throwaway dir per browser (loses history every time) or one truly
+// shared dir (impossible while >1 window is open), we keep a small pool of
+// real, on-disk profile dirs and check them out round-robin. Each slot keeps
+// accumulating its own genuine history/cache/cookies across every reuse —
+// no copying, no merge logic, just "pick a free chair."
+const PROFILE_POOL_SIZE = Number(process.env.BROWSER_PROFILE_POOL_SIZE) || 4;
+
+const busyProfileSlots = new Set(); // slot indices currently checked out
+let nextOverflowSlot = PROFILE_POOL_SIZE;
+
+// Files Chrome writes per-run to enforce its single-instance lock. If our
+// own process tracking says a slot is free, any of these left over from an
+// unclean shutdown are stale and safe to clear before relaunching into it.
+const SINGLETON_LOCK_FILES = [
+    'SingletonLock',
+    'SingletonSocket',
+    'SingletonCookie',
+    'lockfile',
+];
+
+function profileDirForSlot(slot) {
+    return path.join(userDataDir, `profile-${slot}`);
+}
+
+async function clearStaleLockFiles(profileDir) {
+    await Promise.all(
+        SINGLETON_LOCK_FILES.map((name) =>
+            fs.rm(path.join(profileDir, name), { force: true }).catch(() => {})
+        )
+    );
+}
+
+// Reserve a slot and clear any stale lock files left over from a crash.
+async function acquireProfileSlot() {
+    let slot = -1;
+    for (let i = 0; i < PROFILE_POOL_SIZE; i++) {
+        if (!busyProfileSlots.has(i)) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot === -1) {
+        // Pool exhausted — shouldn't normally happen at your usage levels,
+        // but grow rather than fail outright.
+        slot = nextOverflowSlot++;
+        console.warn(
+            `Profile pool exhausted (size ${PROFILE_POOL_SIZE}); allocating overflow slot ${slot}`
+        );
+    }
+    busyProfileSlots.add(slot);
+    const profileDir = profileDirForSlot(slot);
+    await fs.mkdir(profileDir, { recursive: true });
+    await clearStaleLockFiles(profileDir);
+    return { slot, profileDir };
+}
+
+function releaseProfileSlot(slot) {
+    busyProfileSlots.delete(slot);
+}
 
 const LAUNCH_ARGS = [
     '--disable-blink-features=AutomationControlled',
@@ -169,6 +232,7 @@ function forceCleanupBrowserEntry(entry) {
     for (const pageEntry of [...entry.pages.values()]) {
         removePageEntry(pageEntry);
     }
+    if (entry.profileSlot !== undefined) releaseProfileSlot(entry.profileSlot);
     browsers.delete(entry.id);
 }
 
@@ -256,23 +320,38 @@ export async function createBrowser(customPassword = undefined) {
     console.log(`  NoVNC port: ${novncPort}`);
     console.log(`  Password: ${password}`);
 
-    const context = await chromium.launchPersistentContext(userDataDir, {
-        headless: false,
-        args: LAUNCH_ARGS,
-        env: {
-            ...process.env,
-            DISPLAY: `:${displayNum}`
-        },
-        executablePath: '/usr/bin/chromium',
+    // Check out a real, reusable profile dir from the pool rather than a
+    // one-off dir keyed on this random id — that's what lets it keep a
+    // continuous cache/cookie/history/extension footprint across runs.
+    const { slot, profileDir } = await acquireProfileSlot();
 
-        viewport: null,
-        locale: REALISTIC_LOCALE,
-        timezoneId: REALISTIC_TIMEZONE,
-        hasTouch: false,
-        isMobile: false,
-        javaScriptEnabled: true,
-        colorScheme: 'light',
-    });
+    let context;
+    try {
+        context = await chromium.launchPersistentContext(profileDir, {
+            headless: false,
+            args: LAUNCH_ARGS,
+            env: {
+                ...process.env,
+                DISPLAY: `:${displayNum}`
+            },
+            executablePath: '/usr/bin/chromium',
+
+            // context-level (anti-detection) options merged into the same call,
+            // since launchPersistentContext launches the browser AND creates
+            // the one-and-only context in a single step.
+            viewport: null,
+            locale: REALISTIC_LOCALE,
+            timezoneId: REALISTIC_TIMEZONE,
+            hasTouch: false,
+            isMobile: false,
+            javaScriptEnabled: true,
+            colorScheme: 'light',
+        });
+    } catch (err) {
+        releaseProfileSlot(slot);
+        await displayManager.cleanupDisplay(displayNum).catch(() => {});
+        throw err;
+    }
 
     const defaultContextId = `default-${id}`;
     const contextEntry = {
@@ -285,9 +364,10 @@ export async function createBrowser(customPassword = undefined) {
 
     const entry = {
         id,
-        context,
+        context,          // persistent context doubles as the "browser" handle
         connected: true,
         profileDir,
+        profileSlot: slot,
         displayNum,
         vncPort,
         novncPort,
@@ -302,9 +382,12 @@ export async function createBrowser(customPassword = undefined) {
     browsers.set(id, entry);
     contexts.set(defaultContextId, contextEntry);
 
+    // launchPersistentContext has no separate Browser object, so 'close' on
+    // the context is the equivalent of the old 'disconnected' event.
     context.on('close', async () => {
         console.log(`Browser ${id} closed, cleaning up display :${displayNum}`);
         entry.connected = false;
+        releaseProfileSlot(slot);
 
         for (const contextEntry of [...entry.contexts.values()]) {
             removeContextEntry(contextEntry);
@@ -379,6 +462,10 @@ export function getBrowserInfo(id) {
 
 /* ----------------------------- context APIs ----------------------------- */
 
+// NOTE: a launched persistent context IS the browser process — Chromium
+// doesn't support multiple isolated profiles inside one launchPersistentContext
+// call, so there's exactly one context per browserId, already created in
+// createBrowser(). This just looks it up.
 async function getOrCreateDefaultContext(browserId) {
     const browserEntry = getBrowserEntry(browserId);
     const defaultId = `default-${browserId}`;
