@@ -493,7 +493,8 @@ export async function createBrowser(customPassword = undefined) {
         env: {
             ...process.env,
             DISPLAY: `:${displayNum}`
-        }
+        },
+        executablePath: '/usr/bin/chromium'
     });
 
     const entry = {
