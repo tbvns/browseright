@@ -11,7 +11,7 @@ Open WebUI tool allowing agents to access a full web browser.
 ### Prerequisites
 *   Node.js (v18 or higher recommended)
 *   npm or yarn
-*   xvfb, x11vnc
+*   xvfb, x11vnc, openbox
 
 ### Installation Steps
 

@@ -173,6 +173,28 @@ class DisplayManager {
         return displayNum;
     }
 
+    async startOpenbox(displayNum) {
+        const openbox = spawn('openbox', [
+            '--display', `:${displayNum}`
+        ], {
+            detached: true,
+            stdio: 'ignore',
+            env: { ...process.env, DISPLAY: `:${displayNum}` }
+        });
+        openbox.unref();
+
+        // Wait briefly for Openbox to initialize
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        if (!this.activeDisplays.has(displayNum)) {
+            this.activeDisplays.set(displayNum, {});
+        }
+        const displayInfo = this.activeDisplays.get(displayNum);
+        displayInfo.openbox = openbox;
+
+        console.log(`[displayManager] Openbox started on display :${displayNum}`);
+    }
+
     async startVnc(displayNum, password, port = null) {
         const vncPort = port || (5900 + displayNum);
         let passwordFile = `/tmp/.vncpass_${displayNum}`;
@@ -239,6 +261,8 @@ class DisplayManager {
         const password   = customPassword !== undefined ? customPassword : this.generatePassword();
 
         await this.startXvfb(displayNum, resolution);
+        await this.startOpenbox(displayNum);
+
         const vncPort = await this.startVnc(displayNum, password);
         const { novncPort, staticPort } = await this.startNoVNC(displayNum, vncPort, password);
 
