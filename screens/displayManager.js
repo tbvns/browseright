@@ -1,10 +1,54 @@
-import { exec, spawn } from 'child_process';
+import { exec, spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 
 const execAsync = promisify(exec);
+
+function storeX11VncPassword(passwordFile, password) {
+    if (typeof password !== 'string' || password.length === 0) {
+        throw new Error('VNC password is required');
+    }
+
+    if (/[\r\n\0]/.test(password)) {
+        throw new Error('VNC password cannot contain newline or null characters');
+    }
+
+    return new Promise((resolve, reject) => {
+        const child = spawn('x11vnc', ['-storepasswd', passwordFile], {
+            stdio: ['pipe', 'ignore', 'pipe'],
+        });
+
+        let stderr = '';
+
+        child.stderr.on('data', (chunk) => {
+            stderr += chunk.toString();
+        });
+
+        child.stdin.on('error', () => {
+
+        });
+
+        child.on('error', reject);
+
+        child.on('close', (code) => {
+            if (code === 0) {
+                resolve();
+            } else {
+                reject(
+                    new Error(
+                        `x11vnc -storepasswd failed with code ${code}: ${stderr.trim()}`
+                    )
+                );
+            }
+        });
+
+        child.stdin.write(`${password}\n`);
+        child.stdin.write(`${password}\n`);
+        child.stdin.end();
+    });
+}
 
 class DisplayManager {
     constructor() {
@@ -18,11 +62,12 @@ class DisplayManager {
         this.defaultPasswordLength = parseInt(process.env.VNC_PASSWORD_LENGTH) || 16;
     }
 
-    generatePassword(length = this.defaultPasswordLength) {
-        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
+    generatePassword(length = 8) {
+        const effectiveLength = Math.min(Math.max(Number(length) || 8, 8), 8);
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
         let password = '';
-        const bytes = crypto.randomBytes(length);
-        for (let i = 0; i < length; i++) {
+        const bytes = crypto.randomBytes(effectiveLength);
+        for (let i = 0; i < effectiveLength; i++) {
             password += chars[bytes[i] % chars.length];
         }
         return password;
@@ -56,18 +101,40 @@ class DisplayManager {
     async startVnc(displayNum, password, port = null) {
         const vncPort = port || (5900 + displayNum);
 
-        // x11vnc requires password file
-        const passwordFile = `/tmp/.vncpass_${displayNum}`;
+        let passwordFile = `/tmp/.vncpass_${displayNum}`;
+        let authArgs;
 
-        // Create password file using x11vnc's built-in tool
-        await execAsync(`echo -n "${password}" | x11vnc -storepasswd ${passwordFile}`);
+        try {
+            await storeX11VncPassword(passwordFile, password);
+
+            try {
+                fs.chmodSync(passwordFile, 0o600);
+            } catch {
+                // Best effort only.
+            }
+
+            authArgs = ['-rfbauth', passwordFile];
+        } catch (err) {
+            // Fallback for environments where x11vnc cannot use stdin/tty properly.
+            //
+            // WARNING: this exposes the password in the process list.
+            // In a containerized/single-tenant environment this is usually acceptable,
+            // but remove this fallback if you need stricter host security.
+            console.warn(
+                `[displayManager] x11vnc -storepasswd failed for display :${displayNum}, ` +
+                `falling back to -passwd. Reason: ${err.message}`
+            );
+
+            passwordFile = null;
+            authArgs = ['-passwd', password];
+        }
 
         const vnc = spawn('x11vnc', [
             '-display', `:${displayNum}`,
             '-forever',
             '-shared',
             '-rfbport', String(vncPort),
-            '-rfbauth', passwordFile,
+            ...authArgs,
             '-quiet'
         ], {
             detached: true,
