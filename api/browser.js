@@ -9,6 +9,301 @@ const DEFAULT_TIMEOUT = 30_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
 const IDLE_CLEANUP_DEFAULT_INTERVAL_MS = 60 * 1000;
 
+/* ------------------------- anti-detection config ------------------------- */
+
+const REALISTIC_USER_AGENT =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+const REALISTIC_VIEWPORT = { width: 1920, height: 1080 };
+
+const REALISTIC_LOCALE = 'en-US';
+
+const REALISTIC_LANGUAGES = ['en-US', 'en'];
+
+const REALISTIC_TIMEZONE = 'America/New_York';
+
+const LAUNCH_ARGS = [
+    '--disable-blink-features=AutomationControlled',
+    '--disable-features=AutomationControllerForContentScripts',
+    '--disable-infobars',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-ipc-flooding-protection',
+    '--disable-component-update',
+    '--disable-default-apps',
+    '--disable-dev-shm-usage',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-popup-blocking',
+    '--disable-extensions',
+    '--disable-hang-monitor',
+    '--disable-sync',
+    '--metrics-recording-only',
+    '--enable-features=NetworkService,NetworkServiceInProcess',
+    '--window-size=1920,1080',
+    '--start-maximized',
+];
+
+/**
+ * Init script injected into every new context to patch detectable
+ * browser APIs that headless / automation browsers get wrong.
+ */
+const STEALTH_INIT_SCRIPT = `
+(() => {
+    'use strict';
+
+    /* ---------- 1. Remove navigator.webdriver ---------- */
+    Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+        configurable: true,
+    });
+
+    /* ---------- 2. Fix navigator.plugins (must be > 0) ---------- */
+    const makePlugin = (name, description, filename, mimeTypes) => {
+        const plugin = Object.create(Plugin.prototype);
+        Object.defineProperties(plugin, {
+            name:        { get: () => name, enumerable: true },
+            description: { get: () => description, enumerable: true },
+            filename:    { get: () => filename, enumerable: true },
+            length:      { get: () => mimeTypes.length, enumerable: true },
+        });
+        mimeTypes.forEach((mt, i) => {
+            Object.defineProperty(plugin, i, { get: () => mt, enumerable: true });
+        });
+        return plugin;
+    };
+
+    const pdfMime = Object.create(MimeType.prototype);
+    Object.defineProperties(pdfMime, {
+        type:        { get: () => 'application/pdf', enumerable: true },
+        suffixes:    { get: () => 'pdf', enumerable: true },
+        description: { get: () => 'Portable Document Format', enumerable: true },
+    });
+
+    const pdfxMime = Object.create(MimeType.prototype);
+    Object.defineProperties(pdfxMime, {
+        type:        { get: () => 'text/pdf', enumerable: true },
+        suffixes:    { get: () => 'pdf', enumerable: true },
+        description: { get: () => '', enumerable: true },
+    });
+
+    const chromePlugins = [
+        makePlugin('PDF Viewer', 'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+        makePlugin('Chrome PDF Viewer', 'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+        makePlugin('Chromium PDF Viewer', 'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+        makePlugin('Microsoft Edge PDF Viewer', 'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+        makePlugin('WebKit built-in PDF', 'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+    ];
+
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+            const list = Object.create(PluginArray.prototype);
+            chromePlugins.forEach((p, i) => {
+                Object.defineProperty(list, i, { get: () => p, enumerable: true });
+            });
+            Object.defineProperty(list, 'length', { get: () => chromePlugins.length, enumerable: true });
+            list.item = (i) => chromePlugins[i] || null;
+            list.namedItem = (n) => chromePlugins.find((p) => p.name === n) || null;
+            list.refresh = () => {};
+            list[Symbol.iterator] = function* () { yield* chromePlugins; };
+            return list;
+        },
+        configurable: true,
+    });
+
+    /* ---------- 3. Fix navigator.mimeTypes (must be > 0) ---------- */
+    const mimeList = [pdfMime, pdfxMime];
+    Object.defineProperty(navigator, 'mimeTypes', {
+        get: () => {
+            const list = Object.create(MimeTypeArray.prototype);
+            mimeList.forEach((m, i) => {
+                Object.defineProperty(list, i, { get: () => m, enumerable: true });
+            });
+            Object.defineProperty(list, 'length', { get: () => mimeList.length, enumerable: true });
+            list.item = (i) => mimeList[i] || null;
+            list.namedItem = (n) => mimeList.find((m) => m.type === n) || null;
+            list[Symbol.iterator] = function* () { yield* mimeList; };
+            return list;
+        },
+        configurable: true,
+    });
+
+    /* ---------- 4. Fix navigator.languages ---------- */
+    Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+        configurable: true,
+    });
+
+    /* ---------- 5. Patch chrome.runtime ---------- */
+    if (!window.chrome) {
+        window.chrome = {};
+    }
+    if (!window.chrome.runtime) {
+        window.chrome.runtime = {
+            OnInstalledReason: {
+                CHROME_UPDATE: 'chrome_update',
+                INSTALL: 'install',
+                SHARED_MODULE_UPDATE: 'shared_module_update',
+                UPDATE: 'update',
+            },
+            OnRestartRequiredReason: {
+                APP_UPDATE: 'app_update',
+                OS_UPDATE: 'os_update',
+                PERIODIC: 'periodic',
+            },
+            PlatformArch: {
+                ARM: 'arm',
+                ARM64: 'arm64',
+                MIPS: 'mips',
+                MIPS64: 'mips64',
+                X86_32: 'x86-32',
+                X86_64: 'x86-64',
+            },
+            PlatformNaclArch: {
+                ARM: 'arm',
+                MIPS: 'mips',
+                MIPS64: 'mips64',
+                X86_32: 'x86-32',
+                X86_64: 'x86-64',
+            },
+            PlatformOs: {
+                ANDROID: 'android',
+                CROS: 'cros',
+                LINUX: 'linux',
+                MAC: 'mac',
+                OPENBSD: 'openbsd',
+                WIN: 'win',
+            },
+            RequestUpdateCheckStatus: {
+                NO_UPDATE: 'no_update',
+                THROTTLED: 'throttled',
+                UPDATE_AVAILABLE: 'update_available',
+            },
+            connect: function () { return { onDisconnect: { addListener: function () {} }, onMessage: { addListener: function () {} }, postMessage: function () {} }; },
+            sendMessage: function () { if (arguments.length > 0 && typeof arguments[arguments.length - 1] === 'function') { arguments[arguments.length - 1](); } },
+        };
+    }
+
+    /* ---------- 6. Fix navigator.userAgentData ---------- */
+    if (navigator.userAgentData) {
+        const brands = [
+            { brand: 'Google Chrome', version: '131' },
+            { brand: 'Chromium', version: '131' },
+            { brand: 'Not_A Brand', version: '24' },
+        ];
+        Object.defineProperty(navigator.userAgentData, 'brands', {
+            get: () => brands,
+            configurable: true,
+        });
+        Object.defineProperty(navigator.userAgentData, 'mobile', {
+            get: () => false,
+            configurable: true,
+        });
+        Object.defineProperty(navigator.userAgentData, 'platform', {
+            get: () => 'Windows',
+            configurable: true,
+        });
+        // Patch getHighEntropyValues to return consistent data
+        const origGetHighEntropy = navigator.userAgentData.getHighEntropyValues
+            ? navigator.userAgentData.getHighEntropyValues.bind(navigator.userAgentData)
+            : null;
+        navigator.userAgentData.getHighEntropyValues = function (hints) {
+            const result = {
+                brands,
+                mobile: false,
+                platform: 'Windows',
+                architecture: 'x86',
+                bitness: '64',
+                model: '',
+                platformVersion: '15.0.0',
+                uaFullVersion: '131.0.6778.205',
+                fullVersionList: [
+                    { brand: 'Google Chrome', version: '131.0.6778.205' },
+                    { brand: 'Chromium', version: '131.0.6778.205' },
+                    { brand: 'Not_A Brand', version: '24.0.0.0' },
+                ],
+            };
+            return Promise.resolve(result);
+        };
+    }
+
+    /* ---------- 7. Fix permissions query ---------- */
+    const originalQuery = window.navigator.permissions?.query?.bind(
+        window.navigator.permissions
+    );
+    if (originalQuery) {
+        window.navigator.permissions.query = (parameters) =>
+            parameters.name === 'notifications'
+                ? Promise.resolve({ state: Notification.permission })
+                : originalQuery(parameters);
+    }
+
+    /* ---------- 8. Fix window.outerWidth / outerHeight ---------- */
+    Object.defineProperty(window, 'outerWidth', {
+        get: () => window.screen.width,
+        configurable: true,
+    });
+    Object.defineProperty(window, 'outerHeight', {
+        get: () => window.screen.height,
+        configurable: true,
+    });
+
+    /* ---------- 9. Fix deviceMemory ---------- */
+    Object.defineProperty(navigator, 'deviceMemory', {
+        get: () => 8,
+        configurable: true,
+    });
+
+    /* ---------- 10. Fix hardwareConcurrency ---------- */
+    Object.defineProperty(navigator, 'hardwareConcurrency', {
+        get: () => 16,
+        configurable: true,
+    });
+
+    /* ---------- 11. WebGL vendor / renderer ---------- */
+    const getParameterProxyHandler = {
+        apply(target, thisArg, args) {
+            const param = args[0];
+            const ext = thisArg.getExtension('WEBGL_debug_renderer_info');
+            if (ext) {
+                if (param === ext.UNMASKED_VENDOR_WEBGL) return 'Google Inc. (NVIDIA)';
+                if (param === ext.UNMASKED_RENDERER_WEBGL)
+                    return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+            }
+            if (param === 37445) return 'Google Inc. (NVIDIA)';
+            if (param === 37446)
+                return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+            return Reflect.apply(target, thisArg, args);
+        },
+    };
+    const origGetParam = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = new Proxy(
+        origGetParam,
+        getParameterProxyHandler
+    );
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+        const origGetParam2 = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = new Proxy(
+            origGetParam2,
+            getParameterProxyHandler
+        );
+    }
+
+    /* ---------- 12. Fix toString for patched functions ---------- */
+    const nativeToString = Function.prototype.toString;
+    const customToString = function () {
+        if (this === window.navigator.permissions?.query) {
+            return 'function query() { [native code] }';
+        }
+        return nativeToString.call(this);
+    };
+    Function.prototype.toString = customToString;
+})();
+`;
+
+/* ------------------------- end anti-detection --------------------------- */
+
 function parseMsEnv(name, fallback) {
     const raw = process.env[name];
     if (raw === undefined || raw === '') return fallback;
@@ -20,7 +315,6 @@ const IDLE_TIMEOUT_MS = parseMsEnv(
     'BROWSER_IDLE_TIMEOUT_MS',
     DEFAULT_IDLE_TIMEOUT_MS
 );
-
 const IDLE_CLEANUP_INTERVAL_MS = Math.max(
     1_000,
     parseMsEnv(
@@ -30,7 +324,6 @@ const IDLE_CLEANUP_INTERVAL_MS = Math.max(
 );
 
 const toId = (id) => id || crypto.randomUUID();
-
 const toTimeout = (t) =>
     Number.isFinite(Number(t)) && Number(t) > 0 ? Number(t) : DEFAULT_TIMEOUT;
 
@@ -49,7 +342,6 @@ function notFound(message) {
 function sendError(res, err, fallback = 500) {
     const status =
         err?.status || (err?.name === 'TimeoutError' ? 504 : fallback);
-
     res.status(status).json({
         error: err?.message || String(err),
         name: err?.name,
@@ -91,11 +383,9 @@ function removePageEntry(pageEntry) {
 
 function removeContextEntry(contextEntry) {
     if (!contextEntry) return;
-
     for (const pageEntry of [...contextEntry.pages.values()]) {
         removePageEntry(pageEntry);
     }
-
     contexts.delete(contextEntry.id);
     browsers.get(contextEntry.browserId)?.contexts.delete(contextEntry.id);
 }
@@ -112,9 +402,7 @@ function toIdleTimeout(value) {
 function touchBrowser(browserId, force = false) {
     const entry = browsers.get(browserId);
     if (!entry) return;
-
     const now = Date.now();
-
     if (!force && now - (entry.lastUsedAt || 0) < 5_000) return;
     entry.lastUsedAt = now;
 }
@@ -124,42 +412,33 @@ function getBrowserIdleTimeoutMs(entry) {
         const ms = Number(entry.idleTimeoutMs);
         if (Number.isFinite(ms) && ms >= 0) return ms;
     }
-
     const ms = Number(IDLE_TIMEOUT_MS);
     if (Number.isFinite(ms) && ms >= 0) return ms;
-
     return DEFAULT_IDLE_TIMEOUT_MS;
 }
 
 function isBrowserIdle(entry, now = Date.now()) {
     const timeout = getBrowserIdleTimeoutMs(entry);
-
     // timeout === 0 disables idle closing
     if (timeout <= 0) return false;
-
     const lastUsedAt =
         entry.lastUsedAt || Date.parse(entry.createdAt) || 0;
-
     return now - lastUsedAt > timeout;
 }
 
 function forceCleanupBrowserEntry(entry) {
     if (!entry) return;
-
     for (const contextEntry of [...entry.contexts.values()]) {
         removeContextEntry(contextEntry);
     }
-
     for (const pageEntry of [...entry.pages.values()]) {
         removePageEntry(pageEntry);
     }
-
     browsers.delete(entry.id);
 }
 
 async function closeIdleBrowser(entry) {
     if (!entry) return;
-
     try {
         if (entry.browser?.isConnected?.()) {
             await entry.browser.close();
@@ -167,23 +446,19 @@ async function closeIdleBrowser(entry) {
     } catch {
         // Best effort only.
     }
-
     forceCleanupBrowserEntry(entry);
 }
 
 export function startIdleBrowserCleanup() {
     if (idleCleanupTimer) return;
-
     idleCleanupTimer = setInterval(async () => {
         if (idleCleanupRunning) return;
         idleCleanupRunning = true;
-
         try {
             const now = Date.now();
             const staleBrowsers = [...browsers.values()].filter((entry) =>
                 isBrowserIdle(entry, now)
             );
-
             await Promise.allSettled(
                 staleBrowsers.map((entry) => closeIdleBrowser(entry))
             );
@@ -191,7 +466,6 @@ export function startIdleBrowserCleanup() {
             idleCleanupRunning = false;
         }
     }, IDLE_CLEANUP_INTERVAL_MS);
-
     idleCleanupTimer.unref?.();
 }
 
@@ -215,7 +489,6 @@ function attachPage(pageId, page, browserId, contextId) {
     if (pages.has(pageId)) {
         throw badRequest(`Page id "${pageId}" already exists`);
     }
-
     const pageEntry = {
         id: pageId,
         browserId,
@@ -223,13 +496,10 @@ function attachPage(pageId, page, browserId, contextId) {
         page,
         createdAt: new Date().toISOString(),
     };
-
     page.on('close', () => removePageEntry(pageEntry));
-
     pages.set(pageId, pageEntry);
     contexts.get(contextId)?.pages.set(pageId, pageEntry);
     browsers.get(browserId)?.pages.set(pageId, pageEntry);
-
     return pageEntry;
 }
 
@@ -243,9 +513,10 @@ async function withPage(pageId, fn) {
 export async function createBrowser() {
     const id = crypto.randomUUID();
 
-    // Vanilla Patchright only.
-    // No args. No proxy. No executablePath. No custom launch options.
-    const browser = await chromium.launch();
+    const browser = await chromium.launch({
+        headless: true,
+        args: LAUNCH_ARGS,
+    });
 
     const entry = {
         id,
@@ -256,18 +527,15 @@ export async function createBrowser() {
         lastUsedAt: Date.now(),
         idleTimeoutMs: toIdleTimeout(undefined),
     };
-
     browsers.set(id, entry);
 
     browser.on('disconnected', () => {
         for (const contextEntry of [...entry.contexts.values()]) {
             removeContextEntry(contextEntry);
         }
-
         for (const pageEntry of [...entry.pages.values()]) {
             removePageEntry(pageEntry);
         }
-
         browsers.delete(id);
     });
 
@@ -289,13 +557,10 @@ export async function closeBrowser(id) {
 
 export async function closeAllBrowsers() {
     const ids = [...browsers.keys()];
-
     await Promise.allSettled(
         ids.map((id) => browsers.get(id)?.browser.close())
     );
-
     for (const id of ids) browsers.delete(id);
-
     return { closed: ids.length };
 }
 
@@ -314,7 +579,6 @@ export function listBrowsers() {
 
 export function getBrowserInfo(id) {
     const entry = getBrowserEntry(id);
-
     return {
         id: entry.id,
         createdAt: entry.createdAt,
@@ -332,14 +596,25 @@ export function getBrowserInfo(id) {
 async function createContextInternal(browserId, contextId) {
     const browserEntry = getBrowserEntry(browserId);
     const id = contextId || crypto.randomUUID();
-
     if (contexts.has(id)) {
         throw badRequest(`Context with id "${id}" already exists`);
     }
 
-    // Vanilla context.
-    // No options. No overrides.
-    const context = await browserEntry.browser.newContext();
+    const context = await browserEntry.browser.newContext({
+        userAgent: REALISTIC_USER_AGENT,
+        viewport: REALISTIC_VIEWPORT,
+        screen: { width: 1920, height: 1080 },
+        locale: REALISTIC_LOCALE,
+        timezoneId: REALISTIC_TIMEZONE,
+        deviceScaleFactor: 1,
+        hasTouch: false,
+        isMobile: false,
+        javaScriptEnabled: true,
+        colorScheme: 'light',
+    });
+
+    // Inject stealth patches before any page script runs
+    await context.addInitScript(STEALTH_INIT_SCRIPT);
 
     const contextEntry = {
         id,
@@ -348,22 +623,17 @@ async function createContextInternal(browserId, contextId) {
         pages: new Map(),
         createdAt: new Date().toISOString(),
     };
-
     browserEntry.contexts.set(id, contextEntry);
     contexts.set(id, contextEntry);
-
     context.on('close', () => removeContextEntry(contextEntry));
-
     return contextEntry;
 }
 
 async function getOrCreateDefaultContext(browserId) {
     const browserEntry = getBrowserEntry(browserId);
     const defaultId = `default-${browserId}`;
-
     let contextEntry = browserEntry.contexts.get(defaultId);
     if (contextEntry) return contextEntry;
-
     await createContextInternal(browserId, defaultId);
     return browserEntry.contexts.get(defaultId);
 }
@@ -374,9 +644,7 @@ export async function newPage(browserId) {
     const contextEntry = await getOrCreateDefaultContext(browserId);
     const page = await contextEntry.context.newPage();
     const pageId = crypto.randomUUID();
-
     attachPage(pageId, page, browserId, contextEntry.id);
-
     return { id: pageId };
 }
 
@@ -384,7 +652,6 @@ export function getPageEntry(pageId) {
     const entry = pages.get(pageId);
     if (!entry) throw notFound(`Page with id "${pageId}" not found`);
     if (entry.page.isClosed()) throw badRequest('Page is closed');
-
     touchBrowser(entry.browserId, true);
     return entry;
 }
@@ -397,12 +664,10 @@ export async function closePage(pageId) {
 
 export function listPages(browserId = null) {
     let entries = [...pages.values()];
-
     if (browserId) {
         getBrowserEntry(browserId);
         entries = entries.filter((entry) => entry.browserId === browserId);
     }
-
     return entries.map(safePageSummary);
 }
 
@@ -419,13 +684,11 @@ export async function getPageInfo(pageId) {
 
 export async function goto(pageId, url, options = {}) {
     if (!url) throw badRequest('url is required');
-
     return withPage(pageId, async (page) => {
         const response = await page.goto(url, {
             timeout: toTimeout(options.timeout),
             waitUntil: options.waitUntil ?? 'load',
         });
-
         return {
             status: response?.status() ?? null,
             ok: response?.ok() ?? null,
@@ -440,7 +703,6 @@ export async function goBack(pageId, options = {}) {
             timeout: toTimeout(options.timeout),
             waitUntil: options.waitUntil ?? 'load',
         });
-
         return {
             status: response?.status() ?? null,
             ...(await navResult(page)),
@@ -454,7 +716,6 @@ export async function goForward(pageId, options = {}) {
             timeout: toTimeout(options.timeout),
             waitUntil: options.waitUntil ?? 'load',
         });
-
         return {
             status: response?.status() ?? null,
             ...(await navResult(page)),
@@ -468,7 +729,6 @@ export async function reload(pageId, options = {}) {
             timeout: toTimeout(options.timeout),
             waitUntil: options.waitUntil ?? 'load',
         });
-
         return {
             status: response?.status() ?? null,
             ...(await navResult(page)),
@@ -483,22 +743,18 @@ export async function waitForLoadState(pageId, state = 'load', options = {}) {
         await page.waitForLoadState(state, {
             timeout: toTimeout(options.timeout),
         });
-
         return { ok: true, state };
     });
 }
 
 export async function waitForSelector(pageId, selector, options = {}) {
     if (!selector) throw badRequest('selector is required');
-
     return withPage(pageId, async (page) => {
         const handle = await page.waitForSelector(selector, {
             timeout: toTimeout(options.timeout),
             state: options.state ?? 'visible',
         });
-
         await handle?.dispose?.().catch(() => {});
-
         return {
             found: true,
             state: options.state ?? 'visible',
@@ -508,18 +764,15 @@ export async function waitForSelector(pageId, selector, options = {}) {
 
 export async function waitForURL(pageId, url, options = {}) {
     if (!url) throw badRequest('url is required');
-
     return withPage(pageId, async (page) => {
         const target =
             typeof url === 'string' && url.includes('*')
                 ? new RegExp(`^${url.split('*').map(escapeRegExp).join('.*')}$`)
                 : url;
-
         await page.waitForURL(target, {
             timeout: toTimeout(options.timeout),
             waitUntil: options.waitUntil ?? 'load',
         });
-
         return await navResult(page);
     });
 }
@@ -529,7 +782,6 @@ export async function waitForNetworkIdle(pageId, options = {}) {
         await page.waitForLoadState('networkidle', {
             timeout: toTimeout(options.timeout),
         });
-
         return { ok: true };
     });
 }
@@ -544,7 +796,6 @@ export async function getContent(pageId) {
 
 export async function click(pageId, selector, options = {}) {
     if (!selector) throw badRequest('selector is required');
-
     return withPage(pageId, async (page) => {
         await page
             .locator(selector)
@@ -552,7 +803,6 @@ export async function click(pageId, selector, options = {}) {
             .click({
                 timeout: toTimeout(options.timeout),
             });
-
         return {
             clicked: selector,
             ...(await navResult(page).catch(() => ({}))),
@@ -562,7 +812,6 @@ export async function click(pageId, selector, options = {}) {
 
 export async function clickText(pageId, text, options = {}) {
     if (!text) throw badRequest('text is required');
-
     return withPage(pageId, async (page) => {
         await page
             .getByText(text, { exact: options.exact ?? false })
@@ -570,7 +819,6 @@ export async function clickText(pageId, text, options = {}) {
             .click({
                 timeout: toTimeout(options.timeout),
             });
-
         return {
             clickedText: text,
             ...(await navResult(page).catch(() => ({}))),
@@ -580,7 +828,6 @@ export async function clickText(pageId, text, options = {}) {
 
 export async function clickRole(pageId, role, options = {}) {
     if (!role) throw badRequest('role is required');
-
     return withPage(pageId, async (page) => {
         await page
             .getByRole(role, {
@@ -591,7 +838,6 @@ export async function clickRole(pageId, role, options = {}) {
             .click({
                 timeout: toTimeout(options.timeout),
             });
-
         return {
             clickedRole: role,
             ...(await navResult(page).catch(() => ({}))),
@@ -601,7 +847,6 @@ export async function clickRole(pageId, role, options = {}) {
 
 export async function fill(pageId, selector, value, options = {}) {
     if (!selector) throw badRequest('selector is required');
-
     return withPage(pageId, async (page) => {
         await page
             .locator(selector)
@@ -609,14 +854,12 @@ export async function fill(pageId, selector, value, options = {}) {
             .fill(value ?? '', {
                 timeout: toTimeout(options.timeout),
             });
-
         return { filled: selector };
     });
 }
 
 export async function fillByLabel(pageId, label, value, options = {}) {
     if (!label) throw badRequest('label is required');
-
     return withPage(pageId, async (page) => {
         await page
             .getByLabel(label, { exact: options.exact ?? false })
@@ -624,14 +867,12 @@ export async function fillByLabel(pageId, label, value, options = {}) {
             .fill(value ?? '', {
                 timeout: toTimeout(options.timeout),
             });
-
         return { filledByLabel: label };
     });
 }
 
 export async function press(pageId, selector, key, options = {}) {
     if (!key) throw badRequest('key is required');
-
     return withPage(pageId, async (page) => {
         if (selector) {
             await page
@@ -643,14 +884,12 @@ export async function press(pageId, selector, key, options = {}) {
         } else {
             await page.keyboard.press(key);
         }
-
         return { pressed: key };
     });
 }
 
 export async function selectOption(pageId, selector, values, options = {}) {
     if (!selector) throw badRequest('selector is required');
-
     return withPage(pageId, async (page) => {
         const selected = await page
             .locator(selector)
@@ -658,14 +897,12 @@ export async function selectOption(pageId, selector, values, options = {}) {
             .selectOption(values ?? [], {
                 timeout: toTimeout(options.timeout),
             });
-
         return { selector, selected };
     });
 }
 
 export async function selectByLabel(pageId, label, values, options = {}) {
     if (!label) throw badRequest('label is required');
-
     return withPage(pageId, async (page) => {
         const selected = await page
             .getByLabel(label, { exact: options.exact ?? false })
@@ -673,7 +910,6 @@ export async function selectByLabel(pageId, label, values, options = {}) {
             .selectOption(values ?? [], {
                 timeout: toTimeout(options.timeout),
             });
-
         return { selectedByLabel: label, selected };
     });
 }
@@ -681,13 +917,7 @@ export async function selectByLabel(pageId, label, values, options = {}) {
 /* -------------------------------- routes -------------------------------- */
 
 export default function setupBrowserRoutes(app) {
-    /*
-        Vanilla engine routes only.
-        No cookies, no storage, no headers, no evaluation, no interception.
-    */
-
     /* ------------------------------ browsers ------------------------------ */
-
     app.post(
         '/api/browser',
         asyncRoute(async (_req, res) => {
@@ -740,7 +970,6 @@ export default function setupBrowserRoutes(app) {
     );
 
     /* -------------------------------- pages ------------------------------- */
-
     app.post(
         '/api/browser/:id/page',
         asyncRoute(async (req, res) => {
@@ -779,7 +1008,6 @@ export default function setupBrowserRoutes(app) {
     );
 
     /* ----------------------------- navigation ----------------------------- */
-
     app.post(
         '/api/page/:pageId/goto',
         asyncRoute(async (req, res) => {
@@ -811,7 +1039,6 @@ export default function setupBrowserRoutes(app) {
     );
 
     /* -------------------------------- waits ------------------------------- */
-
     app.post(
         '/api/page/:pageId/wait/selector',
         asyncRoute(async (req, res) => {
@@ -855,7 +1082,6 @@ export default function setupBrowserRoutes(app) {
     );
 
     /* -------------------------------- actions ----------------------------- */
-
     app.post(
         '/api/page/:pageId/click',
         asyncRoute(async (req, res) => {
