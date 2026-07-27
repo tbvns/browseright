@@ -12,15 +12,13 @@ const IDLE_CLEANUP_DEFAULT_INTERVAL_MS = 60 * 1000;
 /* ------------------------- anti-detection config ------------------------- */
 
 const REALISTIC_USER_AGENT =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36';
 
 const REALISTIC_VIEWPORT = { width: 1920, height: 1080 };
 
-const REALISTIC_LOCALE = 'en-US';
+const REALISTIC_LOCALE = 'fr-FR';
 
-const REALISTIC_LANGUAGES = ['en-US', 'en'];
-
-const REALISTIC_TIMEZONE = 'America/New_York';
+const REALISTIC_TIMEZONE = 'Europe/PAris';
 
 const LAUNCH_ARGS = [
     '--disable-blink-features=AutomationControlled',
@@ -45,64 +43,77 @@ const LAUNCH_ARGS = [
     '--start-maximized',
 ];
 
-/**
- * Init script injected into every new context to patch detectable
- * browser APIs that headless / automation browsers get wrong.
- */
 const STEALTH_INIT_SCRIPT = `
 (() => {
     'use strict';
 
-    /* ---------- 1. Remove navigator.webdriver ---------- */
-    Object.defineProperty(navigator, 'webdriver', {
+    /* ==================================================================
+     * 1.  navigator.webdriver  →  false
+     *     Defined on the prototype so it does NOT appear as an own
+     *     property of the navigator instance.
+     * ================================================================== */
+    try { delete navigator.webdriver; } catch (_) {}
+    Object.defineProperty(Navigator.prototype, 'webdriver', {
         get: () => false,
         configurable: true,
+        enumerable: true,
     });
 
-    /* ---------- 2. Fix navigator.plugins (must be > 0) ---------- */
+    /* ==================================================================
+     * 2.  navigator.plugins  →  5 realistic PDF plugins
+     *     Defined on Navigator.prototype (where real Chrome puts them).
+     * ================================================================== */
+    try { delete navigator.plugins; } catch (_) {}
+
     const makePlugin = (name, description, filename, mimeTypes) => {
         const plugin = Object.create(Plugin.prototype);
         Object.defineProperties(plugin, {
-            name:        { get: () => name, enumerable: true },
-            description: { get: () => description, enumerable: true },
-            filename:    { get: () => filename, enumerable: true },
-            length:      { get: () => mimeTypes.length, enumerable: true },
+            name:        { get: () => name,        enumerable: true, configurable: true },
+            description: { get: () => description, enumerable: true, configurable: true },
+            filename:    { get: () => filename,    enumerable: true, configurable: true },
+            length:      { get: () => mimeTypes.length, enumerable: true, configurable: true },
         });
         mimeTypes.forEach((mt, i) => {
-            Object.defineProperty(plugin, i, { get: () => mt, enumerable: true });
+            Object.defineProperty(plugin, String(i), {
+                get: () => mt, enumerable: true, configurable: true,
+            });
         });
         return plugin;
     };
 
     const pdfMime = Object.create(MimeType.prototype);
     Object.defineProperties(pdfMime, {
-        type:        { get: () => 'application/pdf', enumerable: true },
-        suffixes:    { get: () => 'pdf', enumerable: true },
-        description: { get: () => 'Portable Document Format', enumerable: true },
+        type:        { get: () => 'application/pdf',  enumerable: true, configurable: true },
+        suffixes:    { get: () => 'pdf',              enumerable: true, configurable: true },
+        description: { get: () => 'Portable Document Format', enumerable: true, configurable: true },
     });
 
     const pdfxMime = Object.create(MimeType.prototype);
     Object.defineProperties(pdfxMime, {
-        type:        { get: () => 'text/pdf', enumerable: true },
-        suffixes:    { get: () => 'pdf', enumerable: true },
-        description: { get: () => '', enumerable: true },
+        type:        { get: () => 'text/pdf', enumerable: true, configurable: true },
+        suffixes:    { get: () => 'pdf',      enumerable: true, configurable: true },
+        description: { get: () => '',         enumerable: true, configurable: true },
     });
 
     const chromePlugins = [
-        makePlugin('PDF Viewer', 'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
-        makePlugin('Chrome PDF Viewer', 'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
-        makePlugin('Chromium PDF Viewer', 'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
-        makePlugin('Microsoft Edge PDF Viewer', 'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
-        makePlugin('WebKit built-in PDF', 'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+        makePlugin('PDF Viewer',              'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+        makePlugin('Chrome PDF Viewer',       'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+        makePlugin('Chromium PDF Viewer',     'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+        makePlugin('Microsoft Edge PDF Viewer','Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+        makePlugin('WebKit built-in PDF',     'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
     ];
 
-    Object.defineProperty(navigator, 'plugins', {
+    Object.defineProperty(Navigator.prototype, 'plugins', {
         get: () => {
             const list = Object.create(PluginArray.prototype);
             chromePlugins.forEach((p, i) => {
-                Object.defineProperty(list, i, { get: () => p, enumerable: true });
+                Object.defineProperty(list, String(i), {
+                    get: () => p, enumerable: true, configurable: true,
+                });
             });
-            Object.defineProperty(list, 'length', { get: () => chromePlugins.length, enumerable: true });
+            Object.defineProperty(list, 'length', {
+                get: () => chromePlugins.length, enumerable: true, configurable: true,
+            });
             list.item = (i) => chromePlugins[i] || null;
             list.namedItem = (n) => chromePlugins.find((p) => p.name === n) || null;
             list.refresh = () => {};
@@ -110,32 +121,89 @@ const STEALTH_INIT_SCRIPT = `
             return list;
         },
         configurable: true,
+        enumerable: true,
     });
 
-    /* ---------- 3. Fix navigator.mimeTypes (must be > 0) ---------- */
+    /* ==================================================================
+     * 3.  navigator.mimeTypes  →  2 PDF MIME types
+     * ================================================================== */
+    try { delete navigator.mimeTypes; } catch (_) {}
+
     const mimeList = [pdfMime, pdfxMime];
-    Object.defineProperty(navigator, 'mimeTypes', {
+    Object.defineProperty(Navigator.prototype, 'mimeTypes', {
         get: () => {
             const list = Object.create(MimeTypeArray.prototype);
             mimeList.forEach((m, i) => {
-                Object.defineProperty(list, i, { get: () => m, enumerable: true });
+                Object.defineProperty(list, String(i), {
+                    get: () => m, enumerable: true, configurable: true,
+                });
             });
-            Object.defineProperty(list, 'length', { get: () => mimeList.length, enumerable: true });
+            Object.defineProperty(list, 'length', {
+                get: () => mimeList.length, enumerable: true, configurable: true,
+            });
             list.item = (i) => mimeList[i] || null;
             list.namedItem = (n) => mimeList.find((m) => m.type === n) || null;
             list[Symbol.iterator] = function* () { yield* mimeList; };
             return list;
         },
         configurable: true,
+        enumerable: true,
     });
 
-    /* ---------- 4. Fix navigator.languages ---------- */
-    Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en'],
+    /* ==================================================================
+     * 4.  navigator.userAgentData  →  full replacement with
+     *     "Google Chrome" brand.  Replaced at prototype level so it
+     *     works consistently and doesn't create own properties.
+     * ================================================================== */
+    const _uaMatch = navigator.userAgent.match(/Chrome\\/([\\d.]+)/);
+    const _uaFullVersion = _uaMatch ? _uaMatch[1] : '149.0.7827.55';
+    const _uaMajor = _uaFullVersion.split('.')[0];
+
+    const _brands = [
+        { brand: 'Google Chrome', version: _uaMajor },
+        { brand: 'Chromium',      version: _uaMajor },
+        { brand: 'Not_A Brand',   version: '24' },
+    ];
+
+    const _fullVersionList = [
+        { brand: 'Google Chrome', version: _uaFullVersion },
+        { brand: 'Chromium',      version: _uaFullVersion },
+        { brand: 'Not_A Brand',   version: '24.0.0.0' },
+    ];
+
+    const _uaData = {
+        brands: _brands,
+        mobile: false,
+        platform: 'Windows',
+        getHighEntropyValues(hints) {
+            const result = {
+                brands: _brands,
+                mobile: false,
+                platform: 'Windows',
+            };
+            if (!hints || !Array.isArray(hints)) return Promise.resolve(result);
+            if (hints.includes('architecture'))  result.architecture  = 'x86';
+            if (hints.includes('bitness'))       result.bitness       = '64';
+            if (hints.includes('model'))         result.model         = '';
+            if (hints.includes('platformVersion')) result.platformVersion = '15.0.0';
+            if (hints.includes('uaFullVersion')) result.uaFullVersion = _uaFullVersion;
+            if (hints.includes('fullVersionList')) result.fullVersionList = _fullVersionList;
+            return Promise.resolve(result);
+        },
+        toJSON() {
+            return { brands: _brands, mobile: false, platform: 'Windows' };
+        },
+    };
+
+    Object.defineProperty(Navigator.prototype, 'userAgentData', {
+        get: () => _uaData,
         configurable: true,
+        enumerable: true,
     });
 
-    /* ---------- 5. Patch chrome.runtime ---------- */
+    /* ==================================================================
+     * 5.  window.chrome.runtime  →  realistic stub
+     * ================================================================== */
     if (!window.chrome) {
         window.chrome = {};
     }
@@ -153,93 +221,52 @@ const STEALTH_INIT_SCRIPT = `
                 PERIODIC: 'periodic',
             },
             PlatformArch: {
-                ARM: 'arm',
-                ARM64: 'arm64',
-                MIPS: 'mips',
-                MIPS64: 'mips64',
-                X86_32: 'x86-32',
-                X86_64: 'x86-64',
+                ARM: 'arm', ARM64: 'arm64', MIPS: 'mips',
+                MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64',
             },
             PlatformNaclArch: {
-                ARM: 'arm',
-                MIPS: 'mips',
-                MIPS64: 'mips64',
-                X86_32: 'x86-32',
-                X86_64: 'x86-64',
+                ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64',
+                X86_32: 'x86-32', X86_64: 'x86-64',
             },
             PlatformOs: {
-                ANDROID: 'android',
-                CROS: 'cros',
-                LINUX: 'linux',
-                MAC: 'mac',
-                OPENBSD: 'openbsd',
-                WIN: 'win',
+                ANDROID: 'android', CROS: 'cros', LINUX: 'linux',
+                MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win',
             },
             RequestUpdateCheckStatus: {
                 NO_UPDATE: 'no_update',
                 THROTTLED: 'throttled',
                 UPDATE_AVAILABLE: 'update_available',
             },
-            connect: function () { return { onDisconnect: { addListener: function () {} }, onMessage: { addListener: function () {} }, postMessage: function () {} }; },
-            sendMessage: function () { if (arguments.length > 0 && typeof arguments[arguments.length - 1] === 'function') { arguments[arguments.length - 1](); } },
+            connect() {
+                return {
+                    onDisconnect: { addListener() {} },
+                    onMessage:    { addListener() {} },
+                    postMessage() {},
+                };
+            },
+            sendMessage() {
+                const cb = arguments[arguments.length - 1];
+                if (typeof cb === 'function') cb();
+            },
         };
     }
 
-    /* ---------- 6. Fix navigator.userAgentData ---------- */
-    if (navigator.userAgentData) {
-        const brands = [
-            { brand: 'Google Chrome', version: '131' },
-            { brand: 'Chromium', version: '131' },
-            { brand: 'Not_A Brand', version: '24' },
-        ];
-        Object.defineProperty(navigator.userAgentData, 'brands', {
-            get: () => brands,
-            configurable: true,
-        });
-        Object.defineProperty(navigator.userAgentData, 'mobile', {
-            get: () => false,
-            configurable: true,
-        });
-        Object.defineProperty(navigator.userAgentData, 'platform', {
-            get: () => 'Windows',
-            configurable: true,
-        });
-        // Patch getHighEntropyValues to return consistent data
-        const origGetHighEntropy = navigator.userAgentData.getHighEntropyValues
-            ? navigator.userAgentData.getHighEntropyValues.bind(navigator.userAgentData)
-            : null;
-        navigator.userAgentData.getHighEntropyValues = function (hints) {
-            const result = {
-                brands,
-                mobile: false,
-                platform: 'Windows',
-                architecture: 'x86',
-                bitness: '64',
-                model: '',
-                platformVersion: '15.0.0',
-                uaFullVersion: '131.0.6778.205',
-                fullVersionList: [
-                    { brand: 'Google Chrome', version: '131.0.6778.205' },
-                    { brand: 'Chromium', version: '131.0.6778.205' },
-                    { brand: 'Not_A Brand', version: '24.0.0.0' },
-                ],
-            };
-            return Promise.resolve(result);
-        };
-    }
-
-    /* ---------- 7. Fix permissions query ---------- */
-    const originalQuery = window.navigator.permissions?.query?.bind(
+    /* ==================================================================
+     * 6.  permissions.query  →  return real Notification.permission
+     * ================================================================== */
+    const _origPermQuery = window.navigator.permissions?.query?.bind(
         window.navigator.permissions
     );
-    if (originalQuery) {
+    if (_origPermQuery) {
         window.navigator.permissions.query = (parameters) =>
             parameters.name === 'notifications'
                 ? Promise.resolve({ state: Notification.permission })
-                : originalQuery(parameters);
+                : _origPermQuery(parameters);
     }
 
-    /* ---------- 8. Fix window.outerWidth / outerHeight ---------- */
+    /* ==================================================================
+     * 7.  window.outerWidth / outerHeight  →  match screen
+     * ================================================================== */
     Object.defineProperty(window, 'outerWidth', {
         get: () => window.screen.width,
         configurable: true,
@@ -249,56 +276,23 @@ const STEALTH_INIT_SCRIPT = `
         configurable: true,
     });
 
-    /* ---------- 9. Fix deviceMemory ---------- */
-    Object.defineProperty(navigator, 'deviceMemory', {
-        get: () => 8,
-        configurable: true,
-    });
+    /* ==================================================================
+     * 8.  Function.prototype.toString  →  hide patched getters
+     * ================================================================== */
+    const _nativeToString = Function.prototype.toString;
+    const _patchedFns = new Set();
 
-    /* ---------- 10. Fix hardwareConcurrency ---------- */
-    Object.defineProperty(navigator, 'hardwareConcurrency', {
-        get: () => 16,
-        configurable: true,
-    });
+    // Collect references we want to mask
+    try {
+        _patchedFns.add(window.navigator.permissions.query);
+    } catch (_) {}
 
-    /* ---------- 11. WebGL vendor / renderer ---------- */
-    const getParameterProxyHandler = {
-        apply(target, thisArg, args) {
-            const param = args[0];
-            const ext = thisArg.getExtension('WEBGL_debug_renderer_info');
-            if (ext) {
-                if (param === ext.UNMASKED_VENDOR_WEBGL) return 'Google Inc. (NVIDIA)';
-                if (param === ext.UNMASKED_RENDERER_WEBGL)
-                    return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-            }
-            if (param === 37445) return 'Google Inc. (NVIDIA)';
-            if (param === 37446)
-                return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-            return Reflect.apply(target, thisArg, args);
-        },
-    };
-    const origGetParam = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = new Proxy(
-        origGetParam,
-        getParameterProxyHandler
-    );
-    if (typeof WebGL2RenderingContext !== 'undefined') {
-        const origGetParam2 = WebGL2RenderingContext.prototype.getParameter;
-        WebGL2RenderingContext.prototype.getParameter = new Proxy(
-            origGetParam2,
-            getParameterProxyHandler
-        );
-    }
-
-    /* ---------- 12. Fix toString for patched functions ---------- */
-    const nativeToString = Function.prototype.toString;
-    const customToString = function () {
-        if (this === window.navigator.permissions?.query) {
+    Function.prototype.toString = function () {
+        if (_patchedFns.has(this)) {
             return 'function query() { [native code] }';
         }
-        return nativeToString.call(this);
+        return _nativeToString.call(this);
     };
-    Function.prototype.toString = customToString;
 })();
 `;
 
