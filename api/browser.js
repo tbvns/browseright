@@ -542,7 +542,16 @@ async function createContextInternal(browserId, contextId) {
 
     const version = browserEntry.version;
 
-    const context = await browserEntry.browser.newContext();
+    const context = await browserEntry.browser.newContext({
+        locale: REALISTIC_LOCALE,
+        timezoneId: REALISTIC_TIMEZONE,
+        deviceScaleFactor: 1,
+        hasTouch: false,
+        isMobile: false,
+        javaScriptEnabled: true,
+        colorScheme: 'light',
+        viewport: null,
+    });
 
     // Inject stealth patches (main-thread-only APIs)
     // await context.addInitScript(STEALTH_INIT_SCRIPT);
