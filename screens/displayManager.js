@@ -296,7 +296,7 @@ class DisplayManager {
         return { novncPort, staticPort };
     }
 
-    async createDisplay(resolution = '1920x1080x24', customPassword = undefined) {
+    async createDisplay(resolution = '720x1080x24', customPassword = undefined) {
         const displayNum = await this.allocateDisplay();
         const password   = customPassword !== undefined ? customPassword : this.generatePassword();
 
