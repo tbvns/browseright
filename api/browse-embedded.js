@@ -6,7 +6,11 @@ import crypto from 'node:crypto';
 
 /* ------------------------------ config ---------------------------------- */
 
-export const EMBED_CONTENT_LIMIT = Number(process.env.EMBED_CONTENT_LIMIT || 20_000);
+export const EMBED_CONTENT_LIMIT = Math.max(
+    1,
+    Number(process.env.EMBED_CONTENT_LIMIT || 20_000)
+);
+
 export const EMBED_MAX_CHUNK_CHARS = Number(process.env.EMBED_MAX_CHUNK_CHARS || 2_200);
 export const EMBED_MAX_CHUNKS = Number(process.env.EMBED_MAX_CHUNKS || 250);
 export const EMBED_TOP_K = Number(process.env.EMBED_TOP_K || 24);
@@ -22,7 +26,9 @@ const EMBED_TEXT_LIMIT = 8_000;
 const RERANK_TEXT_LIMIT = 4_000;
 
 /*
-  Modify these easily.
+    Processing rules:
+    - Patchright remains vanilla.
+    - All normalization / AI optimization happens here, outside the browser.
 */
 
 export const HTML_BLACKLIST_SELECTORS = [
@@ -34,7 +40,6 @@ export const HTML_BLACKLIST_SELECTORS = [
     '[role="banner"]',
     '[role="search"]',
 
-    // Generic site chrome
     '.sidebar',
     '.infobox',
     '.metadata',
@@ -51,7 +56,6 @@ export const HTML_BLACKLIST_SELECTORS = [
     '.sistersitebox',
     '.navigation-not-searchable',
 
-    // Wikipedia navboxes
     '.navbox',
     '.vertical-navbox',
     '.navbox-inner',
@@ -60,7 +64,6 @@ export const HTML_BLACKLIST_SELECTORS = [
     '.navbox-group',
     '.navbox-title',
 
-    // Wikipedia TOC
     '.toc',
     '#toc',
     '.toctitle',
@@ -70,14 +73,12 @@ export const HTML_BLACKLIST_SELECTORS = [
     '.tocnumber',
     '.toctext',
 
-    // Wikipedia edit junk
     '.mw-editsection',
     '.mw-jump-link',
     '.mw-jump-link-container',
     '.screen-reader-text',
     '.mw-empty-elt',
 
-    // Wikipedia header / search / language chrome
     '#mw-panel',
     '#mw-head',
     '#mw-navigation',
@@ -85,7 +86,6 @@ export const HTML_BLACKLIST_SELECTORS = [
     '#mw-head-base',
     '#left-navigation',
     '#right-navigation',
-
     '#p-lang',
     '#p-search',
     '#p-logo',
@@ -96,11 +96,11 @@ export const HTML_BLACKLIST_SELECTORS = [
     '#p-views',
     '#p-cactions',
     '#p-personal',
-
     '#searchInput',
     '#searchButton',
     '#searchform',
     '#searchform2',
+
     '.search-container',
     '.cdx-search-input',
 
@@ -109,7 +109,6 @@ export const HTML_BLACKLIST_SELECTORS = [
     '.vector-header-content',
     '.vector-page-toolbar',
     '.vector-page-titlebar',
-
     '.vector-menu',
     '.vector-menu-content',
     '.vector-menu-content-list',
@@ -131,7 +130,6 @@ export const HTML_BLACKLIST_SELECTORS = [
 
     '.interlanguage-link',
     '.interlanguage-link-target',
-
     '.mw-indicators',
     '.mw-indicator',
 
@@ -139,7 +137,6 @@ export const HTML_BLACKLIST_SELECTORS = [
     '#siteSub',
     '#contentSub',
     '.mw-content-subtitle',
-
     '.firstHeading',
     '.mw-first-heading',
     '.mw-page-title',
@@ -147,7 +144,6 @@ export const HTML_BLACKLIST_SELECTORS = [
 ];
 
 export const HTML_BLACKLIST_TAGS = new Set([
-    // scripts / styles / embedded junk
     'script',
     'style',
     'noscript',
@@ -161,7 +157,6 @@ export const HTML_BLACKLIST_TAGS = new Set([
     'base',
     'head',
 
-    // images / svg / vector paths
     'img',
     'image',
     'picture',
@@ -187,7 +182,6 @@ export const HTML_BLACKLIST_TAGS = new Set([
     'marker',
     'foreignObject',
 
-    // media
     'video',
     'audio',
     'track',
@@ -195,7 +189,6 @@ export const HTML_BLACKLIST_TAGS = new Set([
     'map',
     'area',
 
-    // mathml
     'math',
     'annotation',
     'semantics',
@@ -212,7 +205,6 @@ export const HTML_BLACKLIST_TAGS = new Set([
     'mtr',
     'mtd',
 
-    // misc
     'data',
     'rb',
     'rtc',
@@ -300,7 +292,6 @@ export const HTML_ALLOWED_ATTRIBUTES = new Set([
     'title',
     'alt',
     'role',
-
     'aria-label',
     'aria-labelledby',
     'aria-describedby',
@@ -310,7 +301,6 @@ export const HTML_ALLOWED_ATTRIBUTES = new Set([
     'aria-selected',
     'aria-checked',
     'aria-disabled',
-
     'checked',
     'selected',
     'disabled',
@@ -326,11 +316,9 @@ export const HTML_ALLOWED_ATTRIBUTES = new Set([
     'autocomplete',
     'inputmode',
     'enterkeyhint',
-
     'data-testid',
     'data-id',
     'data-role',
-
     'rel',
     'target',
 ]);
@@ -410,6 +398,7 @@ const runtime = {
 let transformersPromise = null;
 let embedderPromise = null;
 let rerankerPromise = null;
+let rerankModelPromise = null;
 
 function uuid() {
     return crypto.randomUUID();
@@ -556,6 +545,93 @@ function htmlToText(html) {
         .trim();
 }
 
+function toAbsoluteUrl(href, baseUrl) {
+    const value = String(href || '').trim();
+
+    if (!value) return '';
+
+    if (value.startsWith('#')) {
+        return baseUrl ? `${String(baseUrl).split('#')[0]}${value}` : value;
+    }
+
+    try {
+        return new URL(value, baseUrl || undefined).toString();
+    } catch {
+        return value;
+    }
+}
+
+function clampContentLimit(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return EMBED_CONTENT_LIMIT;
+    return Math.min(n, EMBED_CONTENT_LIMIT);
+}
+
+function sanitizeAttributeValue(name, value) {
+    if (value === undefined || value === null) return null;
+
+    const v = String(value);
+    const lowerName = String(name || '').toLowerCase();
+
+    if (
+        (lowerName === 'src' ||
+            lowerName === 'href' ||
+            lowerName === 'srcset' ||
+            lowerName === 'data') &&
+        v.trim().toLowerCase().startsWith('data:image')
+    ) {
+        return '';
+    }
+
+    return v;
+}
+
+function getLabelText($, el) {
+    const $el = $(el);
+
+    const aria = $el.attr('aria-label');
+    if (aria && aria.trim()) return aria.trim();
+
+    const id = $el.attr('id');
+
+    if (id) {
+        try {
+            const label = $(`label[for="${id}"]`).first().text();
+            if (label && label.trim()) {
+                return label.replace(/\s+/g, ' ').trim();
+            }
+        } catch {
+            // ignore invalid selector
+        }
+    }
+
+    const closest = $el.closest('label').text();
+    if (closest && closest.trim()) {
+        return closest.replace(/\s+/g, ' ').trim();
+    }
+
+    return null;
+}
+
+function getCheerioValue($, el) {
+    const $el = $(el);
+    const tag = el.tagName?.toLowerCase?.();
+
+    if (tag === 'textarea') {
+        return $el.text() || null;
+    }
+
+    if (tag === 'select') {
+        return (
+            $el.find('option[selected]').first().attr('value') ||
+            $el.attr('value') ||
+            null
+        );
+    }
+
+    return $el.attr('value') ?? null;
+}
+
 /* --------------------------- HTML simplifier ---------------------------- */
 
 const DATA_URI_ATTR_RE = /=("|')data:[^"']*\1/gi;
@@ -567,7 +643,6 @@ export function simplifyHtml(html, options = {}) {
 
     const $ = load(html_, { decodeEntities: false });
 
-    // Remove comments everywhere.
     const removeComments = (root) => {
         $(root)
             .contents()
@@ -586,7 +661,6 @@ export function simplifyHtml(html, options = {}) {
 
     removeComments($.root());
 
-    // Remove blacklisted tags completely.
     for (const tag of HTML_BLACKLIST_TAGS) {
         $(tag).remove();
     }
@@ -599,7 +673,6 @@ export function simplifyHtml(html, options = {}) {
         }
     }
 
-    // Optionally remove hidden things.
     if (options.removeHidden !== false) {
         $('[hidden]').remove();
         $('[aria-hidden="true"]').remove();
@@ -609,7 +682,6 @@ export function simplifyHtml(html, options = {}) {
         $('[style*="visibility: hidden"]').remove();
     }
 
-    // Unwrap tags not in whitelist.
     const all = $('*').toArray();
 
     for (const el of all) {
@@ -626,7 +698,6 @@ export function simplifyHtml(html, options = {}) {
         }
     }
 
-    // Clean attributes.
     $('*').each((_, el) => {
         const attribs = el.attribs || {};
 
@@ -634,25 +705,21 @@ export function simplifyHtml(html, options = {}) {
             const lower = name.toLowerCase();
             const value = attribs[name];
 
-            // Remove all event handlers.
             if (lower.startsWith('on')) {
                 delete el.attribs[name];
                 continue;
             }
 
-            // Remove inline styles always.
             if (lower === 'style') {
                 delete el.attribs[name];
                 continue;
             }
 
-            // Remove non-whitelisted attributes.
             if (!HTML_ALLOWED_ATTRIBUTES.has(lower)) {
                 delete el.attribs[name];
                 continue;
             }
 
-            // Sanitize URL attributes.
             if (lower === 'href' || lower === 'action') {
                 if (!isSafeUrl(value)) {
                     delete el.attribs[name];
@@ -661,12 +728,10 @@ export function simplifyHtml(html, options = {}) {
         }
     });
 
-    // Extra safety for anchors.
     $('a[href^="javascript:"]').removeAttr('href');
     $('a[href^="data:"]').removeAttr('href');
     $('a[href^="vbscript:"]').removeAttr('href');
 
-    // Remove empty non-interactive elements.
     const voidish = new Set(['br', 'hr', 'input', 'wbr']);
 
     $('*')
@@ -678,8 +743,8 @@ export function simplifyHtml(html, options = {}) {
             if (voidish.has(tag)) return;
 
             const $el = $(el);
-
             const text = $el.text().replace(/\s+/g, '');
+
             const hasInteractive =
                 $el.find('input, select, textarea, button, a').length > 0;
 
@@ -701,6 +766,7 @@ export function simplifyHtml(html, options = {}) {
 
     output = String(output || '')
         .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/data:image[^"'\s)>]*/gi, '')
         .replace(/[ \t]+/g, ' ')
         .replace(/\n\s*\n\s*\n+/g, '\n\n')
         .trim();
@@ -708,7 +774,115 @@ export function simplifyHtml(html, options = {}) {
     return output;
 }
 
-/* --------------------------- markdown cleaner --------------------------- */
+/* --------------------------- markdown helpers --------------------------- */
+
+export function htmlToMarkdown(html) {
+    if (!html) return '';
+
+    const $ = load(html, { decodeEntities: false });
+    const root = $('body').length ? $('body') : $.root();
+
+    const inline = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+    function md(node) {
+        if (node.type === 'text') {
+            return inline(node.data);
+        }
+
+        if (node.type !== 'tag') return '';
+
+        const tag = node.tagName?.toLowerCase?.();
+        if (!tag || HTML_BLACKLIST_TAGS.has(tag)) return '';
+
+        const el = $(node);
+        const inner = el
+            .contents()
+            .map((_, child) => md(child))
+            .get()
+            .join('');
+
+        switch (tag) {
+            case 'h1':
+                return `# ${inline(inner)}\n\n`;
+            case 'h2':
+                return `## ${inline(inner)}\n\n`;
+            case 'h3':
+                return `### ${inline(inner)}\n\n`;
+            case 'h4':
+                return `#### ${inline(inner)}\n\n`;
+            case 'h5':
+                return `##### ${inline(inner)}\n\n`;
+            case 'h6':
+                return `###### ${inline(inner)}\n\n`;
+
+            case 'p':
+                return inline(inner) ? `${inline(inner)}\n\n` : '';
+
+            case 'br':
+                return '\n';
+
+            case 'hr':
+                return '\n\n---\n\n';
+
+            case 'li':
+                return `- ${inline(inner)}\n`;
+
+            case 'ul':
+            case 'ol':
+                return inner ? `${inner}\n` : '';
+
+            case 'a': {
+                const href = el.attr('href') || '';
+                const text = inline(inner);
+
+                if (href && text && isSafeUrl(href)) {
+                    return `[${text}](${href})`;
+                }
+
+                return text;
+            }
+
+            case 'strong':
+            case 'b':
+                return inline(inner) ? `**${inline(inner)}**` : '';
+
+            case 'em':
+            case 'i':
+                return inline(inner) ? `*${inline(inner)}*` : '';
+
+            case 'code':
+                return inline(inner) ? `\`${inline(inner)}\`` : '';
+
+            case 'pre':
+                return `\n\`\`\`\n${el.text().trim()}\n\`\`\`\n\n`;
+
+            case 'blockquote':
+                return inline(inner)
+                    ? `> ${inline(inner)}\n\n`
+                    : '';
+
+            case 'table':
+            case 'div':
+            case 'section':
+            case 'article':
+            case 'main':
+            case 'header':
+            case 'footer':
+                return inline(inner) ? `${inline(inner)}\n` : '';
+
+            default:
+                return inner;
+        }
+    }
+
+    return root
+        .contents()
+        .map((_, node) => md(node))
+        .get()
+        .join('')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
 
 export function cleanMarkdown(input) {
     if (!input) return '';
@@ -726,6 +900,7 @@ export function cleanMarkdown(input) {
             const cleanHref = String(href || '').trim();
 
             if (!cleanText) return '';
+
             if (!cleanHref || cleanHref.startsWith('#')) return cleanText;
 
             if (/^(https?:|mailto:|tel:)/i.test(cleanHref)) {
@@ -745,6 +920,182 @@ export function cleanMarkdown(input) {
         .replace(/[ \t]+\n/g, '\n')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
+}
+
+/* ------------------------------ snapshot -------------------------------- */
+
+export function snapshotFromHtml(html, info = {}, options = {}) {
+    const $ = load(html || '', { decodeEntities: false });
+
+    $('script, style, noscript, template, iframe, object, embed, svg, canvas, picture, img').remove();
+
+    const title =
+        info.title ||
+        $('title').first().text().replace(/\s+/g, ' ').trim();
+
+    const url = info.url || '';
+
+    const textLimit = Math.max(0, Number(options.textLimit || 4_000));
+    const text = htmlToText($.html()).slice(0, textLimit);
+
+    const links = [];
+
+    $('a[href]').each((i, el) => {
+        if (i >= 200) return false;
+
+        const href = $(el).attr('href') || '';
+        const abs = toAbsoluteUrl(href, url);
+        const linkText = $(el)
+            .text()
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 200);
+
+        if (linkText || abs) {
+            links.push({
+                text: linkText,
+                href: abs,
+            });
+        }
+    });
+
+    const inputs = [];
+
+    $('input, textarea, select').each((i, el) => {
+        if (i >= 200) return false;
+
+        const $el = $(el);
+
+        inputs.push({
+            tag: el.tagName?.toLowerCase?.() || null,
+            type: $el.attr('type') || null,
+            name: $el.attr('name') || null,
+            id: $el.attr('id') || null,
+            placeholder: $el.attr('placeholder') || null,
+            label: getLabelText($, el),
+            value: getCheerioValue($, el),
+        });
+    });
+
+    const buttons = [];
+
+    $('button, [role="button"], input[type="button"], input[type="submit"]').each(
+        (i, el) => {
+            if (i >= 200) return false;
+
+            const $el = $(el);
+
+            const buttonText = (
+                $el.text() ||
+                $el.attr('value') ||
+                $el.attr('aria-label') ||
+                ''
+            )
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 200);
+
+            buttons.push({
+                tag: el.tagName?.toLowerCase?.() || null,
+                text: buttonText,
+                id: $el.attr('id') || null,
+                name: $el.attr('name') || null,
+            });
+        }
+    );
+
+    return {
+        title,
+        url,
+        text,
+        accessibility: null,
+        links,
+        inputs,
+        buttons,
+        htmlLength: String(html || '').length,
+    };
+}
+
+/* ------------------------------ extraction ------------------------------ */
+
+function extractCheerioFields($, el, def) {
+    const $el = $(el);
+    const out = {};
+
+    if (def.text) {
+        out.text = $el.text().replace(/\s+/g, ' ').trim() || null;
+    }
+
+    if (def.html) {
+        out.html = $.html(el);
+    }
+
+    if (def.value) {
+        out.value = getCheerioValue($, el);
+    }
+
+    if (def.attribute) {
+        out.attribute = sanitizeAttributeValue(
+            def.attribute,
+            $el.attr(def.attribute)
+        );
+    }
+
+    if (Array.isArray(def.attributes)) {
+        for (const attr of def.attributes) {
+            out[attr] = sanitizeAttributeValue(attr, $el.attr(attr));
+        }
+    }
+
+    if (Object.keys(out).length === 0) {
+        out.text = $el.text().replace(/\s+/g, ' ').trim() || null;
+        out.href = sanitizeAttributeValue('href', $el.attr('href'));
+    }
+
+    return out;
+}
+
+export async function extractFromPage(pageId, spec = {}, options = {}) {
+    const cache = await buildPageCache(pageId, options);
+    const $ = load(cache.rawHtml || '', { decodeEntities: false });
+
+    const out = {};
+
+    for (const [key, def] of Object.entries(spec || {})) {
+        if (!def || typeof def !== 'object') continue;
+        if (!def.selector) continue;
+
+        const fieldDef =
+            def.fields && typeof def.fields === 'object' ? def.fields : def;
+
+        try {
+            const els = $(def.selector);
+
+            if (def.all) {
+                const limit = Math.max(
+                    1,
+                    Math.min(Number(def.limit) || 100, 100)
+                );
+
+                out[key] = els
+                    .toArray()
+                    .slice(0, limit)
+                    .map((el) => extractCheerioFields($, el, fieldDef));
+            } else {
+                const first = els.first();
+
+                if (!first || !first.length) {
+                    out[key] = null;
+                } else {
+                    out[key] = extractCheerioFields($, first.get(0), fieldDef);
+                }
+            }
+        } catch {
+            out[key] = null;
+        }
+    }
+
+    return out;
 }
 
 /* ------------------------------ chunking -------------------------------- */
@@ -789,7 +1140,6 @@ function chunkCleanHtml(html, maxChars) {
 
     function addPart(htmlPart, textPart) {
         const cleanText = String(textPart || '').replace(/\s+/g, ' ').trim();
-
         if (!cleanText) return;
 
         if (currentText.length + cleanText.length > maxChars && currentText) {
@@ -804,7 +1154,6 @@ function chunkCleanHtml(html, maxChars) {
         for (const node of nodes) {
             if (node.type === 'text') {
                 const text = (node.data || '').replace(/\s+/g, ' ').trim();
-
                 if (!text) continue;
 
                 const pieces = splitTextIntoPieces(text, maxChars);
@@ -820,7 +1169,6 @@ function chunkCleanHtml(html, maxChars) {
 
             const tag = node.tagName?.toLowerCase?.();
             if (!tag) continue;
-
             if (HTML_BLACKLIST_TAGS.has(tag)) continue;
 
             const $el = $(node);
@@ -830,11 +1178,13 @@ function chunkCleanHtml(html, maxChars) {
                 if (currentText.length > 80) flush();
 
                 const level = Number(tag[1]);
+
                 headingPath = headingPath.slice(0, level - 1);
                 headingPath[level - 1] = text;
                 headingPath = headingPath.filter(Boolean);
 
                 addPart($.html(node), text);
+
                 continue;
             }
 
@@ -884,7 +1234,6 @@ function lexicalEmbed(text, dim = 256) {
     }
 
     const norm = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0)) || 1;
-
     return vec.map((v) => v / norm);
 }
 
@@ -912,9 +1261,10 @@ function lexicalRerank(query, docs) {
             ? 0.25
             : 0;
 
-        const exactPhrase = qString && String(doc || '').toLowerCase().includes(qString)
-            ? 0.35
-            : 0;
+        const exactPhrase =
+            qString && String(doc || '').toLowerCase().includes(qString)
+                ? 0.35
+                : 0;
 
         const score = coverage * 2.0 + density + early + exactPhrase;
 
@@ -959,26 +1309,6 @@ async function getEmbedder() {
 
     return embedderPromise;
 }
-
-async function getReranker() {
-    if (!rerankerPromise) {
-        rerankerPromise = (async () => {
-            const tf = await loadTransformers();
-
-            if (tf.env) {
-                tf.env.allowLocalModels = process.env.ALLOW_LOCAL_MODELS === 'true';
-            }
-
-            return tf.pipeline('text-classification', RERANK_MODEL, {
-                quantized: true,
-            });
-        })();
-    }
-
-    return rerankerPromise;
-}
-
-let rerankModelPromise = null;
 
 async function getRerankModelDirect() {
     if (!rerankModelPromise) {
@@ -1064,6 +1394,7 @@ async function embedTexts(texts) {
         }
 
         runtime.embedderModel = EMBED_MODEL;
+
         return vectors;
     } catch (err) {
         if (!runtime.warnedEmbed) {
@@ -1075,6 +1406,7 @@ async function embedTexts(texts) {
         }
 
         runtime.embedderModel = 'lexical';
+
         return sanitized.map((t) => lexicalEmbed(t));
     }
 }
@@ -1137,6 +1469,7 @@ async function rerankDocs(query, docs) {
         }
 
         runtime.rerankerModel = 'lexical';
+
         return lexicalRerank(query, sanitized);
     }
 }
@@ -1144,16 +1477,15 @@ async function rerankDocs(query, docs) {
 /* ------------------------------ page cache ------------------------------ */
 
 async function buildPageCache(pageId, options = {}) {
-    const [rawHtml, rawMarkdown, info] = await Promise.all([
+    const [rawHtml, info] = await Promise.all([
         browserAgent.getContent(pageId).catch(() => ''),
-        browserAgent.getMarkdown(pageId).catch(() => ''),
         browserAgent.getPageInfo(pageId).catch(() => ({ title: '', url: '' })),
     ]);
 
     const cleanHtml = simplifyHtml(rawHtml, options);
-    const markdown = cleanMarkdown(rawMarkdown || htmlToText(cleanHtml));
+    const markdown = cleanMarkdown(htmlToMarkdown(cleanHtml));
 
-    const hash = sha256(`${cleanHtml}\n${markdown}`);
+    const hash = sha256(`${info.url || ''}\n${rawHtml}`);
 
     let cache = pageCache.get(pageId);
 
@@ -1166,6 +1498,7 @@ async function buildPageCache(pageId, options = {}) {
         cache = {
             pageId,
             hash,
+            rawHtml,
             cleanHtml,
             markdown,
             info,
@@ -1193,6 +1526,7 @@ async function ensureChunkEmbeddings(cache) {
     }
 
     const texts = cache.chunks.map((c) => c.markdown || c.text);
+
     cache.embeddings = await embedTexts(texts);
     cache.model = runtime.embedderModel;
 }
@@ -1202,7 +1536,7 @@ async function ensureChunkEmbeddings(cache) {
 export async function smartPageContext(pageId, options = {}) {
     const cache = await buildPageCache(pageId, options);
 
-    const limit = Number(options.limit || EMBED_CONTENT_LIMIT);
+    const limit = clampContentLimit(options.limit);
 
     const contentLength = Math.max(
         cache.markdown.length,
@@ -1242,8 +1576,15 @@ export async function smartPageContext(pageId, options = {}) {
         cache.info.url ||
         'main content';
 
-    const topK = Number(options.topK || RERANK_TOP_K);
-    const candidateK = Number(options.candidateK || EMBED_TOP_K);
+    const topK = Math.max(
+        1,
+        Math.min(Number(options.topK) || RERANK_TOP_K, 20)
+    );
+
+    const candidateK = Math.max(
+        topK,
+        Math.min(Number(options.candidateK) || EMBED_TOP_K, 100)
+    );
 
     if (!cache.chunks.length) {
         return {
@@ -1278,10 +1619,10 @@ export async function smartPageContext(pageId, options = {}) {
     );
 
     const candidateCount = candidates.length;
-
     const embedScores = candidates.map((c) => c.score);
 
     const rerankRaw = new Array(candidateCount).fill(0);
+
     for (const r of reranked) {
         rerankRaw[r.index] = r.score;
     }
@@ -1292,6 +1633,7 @@ export async function smartPageContext(pageId, options = {}) {
     );
 
     const lexicalRaw = new Array(candidateCount).fill(0);
+
     for (const r of lexicalResults) {
         lexicalRaw[r.index] = r.score;
     }
@@ -1314,28 +1656,17 @@ export async function smartPageContext(pageId, options = {}) {
 
     const rerankSpread = Math.max(...rerankRaw) - Math.min(...rerankRaw);
 
-// If reranker is saturated/useless, trust it less.
     const rerankWeight = rerankSpread > 1e-4 ? 0.5 : 0.15;
     const embedWeight = 0.3;
     const lexWeight = 1 - rerankWeight - embedWeight;
 
     let top = candidates.map((candidate, i) => {
-        const heading = candidate.chunk.heading || '';
-        const text = candidate.chunk.text || '';
-
-        const headingBoost =
-            /found|pioneer|origin|birth|dartmouth|early|history|mcCarthy|minsky|simon|newell|turing/i.test(
-                `${heading} ${text.slice(0, 300)}`
-            )
-                ? 0.08
-                : 0;
-
         let finalScore =
             rerankWeight * rerankNorm[i] +
             embedWeight * embedNorm[i] +
             lexWeight * lexNorm[i];
 
-        finalScore = Math.min(1, finalScore + headingBoost);
+        finalScore = Math.min(1, finalScore);
 
         return {
             ...candidate.chunk,
@@ -1362,7 +1693,6 @@ export async function smartPageContext(pageId, options = {}) {
     const html = top
         .map((c) => {
             const heading = escapeHtml(c.heading || '');
-
             return `<section data-chunk-index="${c.index}" data-heading="${heading}">
 ${c.html}
 </section>`;
@@ -1390,9 +1720,8 @@ export async function getPageContext(pageId, options = {}) {
 }
 
 /*
-  Wrapped content functions.
-
-  These are the ones the agent should call.
+    Wrapped content functions.
+    These are the ones the agent should call.
 */
 
 export async function getContent(pageId, options = {}) {
@@ -1420,14 +1749,11 @@ export async function getBodyText(pageId, options = {}) {
 }
 
 export async function agentSnapshot(pageId, options = {}) {
-    const [snapshot, context] = await Promise.all([
-        browserAgent
-            .agentSnapshot(pageId, {
-                textLimit: 4_000,
-            })
-            .catch(() => ({})),
-        smartPageContext(pageId, options).catch(() => null),
-    ]);
+    const cache = await buildPageCache(pageId, options);
+
+    const context = await smartPageContext(pageId, options).catch(() => null);
+
+    const snapshot = snapshotFromHtml(cache.rawHtml, cache.info, options);
 
     return {
         ...snapshot,
@@ -1436,9 +1762,8 @@ export async function agentSnapshot(pageId, options = {}) {
 }
 
 /*
-  Navigation wrappers.
-
-  Invalidate cached content after navigation.
+    Navigation wrappers.
+    Invalidate cached content after navigation.
 */
 
 export async function goto(pageId, url, options = {}) {
@@ -1485,10 +1810,13 @@ export const embeddedBrowser = {
     // new retrieval APIs
     smartPageContext,
     getPageContext,
+    extractFromPage,
 
     // utilities
     simplifyHtml,
     cleanMarkdown,
+    htmlToMarkdown,
+    snapshotFromHtml,
 
     // routes
     setupEmbeddedBrowserRoutes,
@@ -1503,6 +1831,7 @@ const RAW_ENDPOINTS_DISABLED = new Set([
     'GET /api/page/:pageId/markdown',
     'GET /api/page/:pageId/text',
     'GET /api/page/:pageId/snapshot',
+    'POST /api/page/:pageId/extract',
 ]);
 
 const ROUTE_METHODS = ['get', 'post', 'put', 'delete', 'patch', 'all'];
@@ -1536,10 +1865,6 @@ function withDisabledRoutes(app, disabled) {
 }
 
 export function setupEmbeddedBrowserRoutes(app) {
-    /*
-      Register wrapped endpoints first.
-      Express uses first matching route, so these override the original ones.
-    */
 
     app.get(
         '/api/page/:pageId/context',
@@ -1614,6 +1939,19 @@ export function setupEmbeddedBrowserRoutes(app) {
         '/api/page/:pageId/snapshot',
         asyncRoute(async (req, res) => {
             res.json(await agentSnapshot(req.params.pageId, req.query || {}));
+        })
+    );
+
+    app.post(
+        '/api/page/:pageId/extract',
+        asyncRoute(async (req, res) => {
+            res.json({
+                data: await extractFromPage(
+                    req.params.pageId,
+                    req.body?.spec || {},
+                    req.body || {}
+                ),
+            });
         })
     );
 
