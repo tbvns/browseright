@@ -9,15 +9,10 @@ const DEFAULT_TIMEOUT = 30_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
 const IDLE_CLEANUP_DEFAULT_INTERVAL_MS = 60 * 1000;
 
-/* ------------------------- anti-detection config ------------------------- */
-
-const REALISTIC_USER_AGENT =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36';
+/* ======================= anti-detection config ========================== */
 
 const REALISTIC_VIEWPORT = { width: 1920, height: 1080 };
-
 const REALISTIC_LOCALE = 'fr-FR';
-
 const REALISTIC_TIMEZONE = 'Europe/Paris';
 
 const LAUNCH_ARGS = [
@@ -48,76 +43,85 @@ const STEALTH_INIT_SCRIPT = `
     'use strict';
 
     /* ==================================================================
-     * 1.  navigator.webdriver  →  false
-     *     Defined on the prototype so it does NOT appear as an own
-     *     property of the navigator instance.
+     * 1. Remove own properties from the navigator INSTANCE.
+     *
+     * Patchright's Chromium defines these as own properties on the
+     * navigator object, which is detectable:
+     *   Object.getOwnPropertyNames(navigator)
+     *   → ["webdriver","plugins","mimeTypes","languages",
+     *      "deviceMemory","hardwareConcurrency"]
+     *
+     * In a real browser this returns [].  All these properties live on
+     * Navigator.prototype.  Deleting the own properties lets the native
+     * prototype getters take over (Patchright patches webdriver at the
+     * C++ level to return false with a native descriptor).
      * ================================================================== */
-    try { delete navigator.webdriver; } catch (_) {}
-    Object.defineProperty(Navigator.prototype, 'webdriver', {
-        get: () => false,
-        configurable: true,
-        enumerable: true,
-    });
+    const _ownProps = [
+        'webdriver', 'plugins', 'mimeTypes',
+        'languages', 'deviceMemory', 'hardwareConcurrency',
+    ];
+    for (const _p of _ownProps) {
+        try { delete navigator[_p]; } catch (_) {}
+    }
 
     /* ==================================================================
-     * 2.  navigator.plugins  →  5 realistic PDF plugins
-     *     Defined on Navigator.prototype (where real Chrome puts them).
+     * 2. navigator.plugins → 5 realistic Chrome PDF plugins.
+     *    Redefined on Navigator.prototype (main-thread only API —
+     *    workers don't have plugins, so no inconsistency).
      * ================================================================== */
-    try { delete navigator.plugins; } catch (_) {}
-
-    const makePlugin = (name, description, filename, mimeTypes) => {
-        const plugin = Object.create(Plugin.prototype);
-        Object.defineProperties(plugin, {
-            name:        { get: () => name,        enumerable: true, configurable: true },
-            description: { get: () => description, enumerable: true, configurable: true },
-            filename:    { get: () => filename,    enumerable: true, configurable: true },
-            length:      { get: () => mimeTypes.length, enumerable: true, configurable: true },
+    const _makePlugin = (name, desc, filename, mimes) => {
+        const p = Object.create(Plugin.prototype);
+        Object.defineProperties(p, {
+            name:        { get: () => name,     enumerable: true, configurable: true },
+            description: { get: () => desc,     enumerable: true, configurable: true },
+            filename:    { get: () => filename, enumerable: true, configurable: true },
+            length:      { get: () => mimes.length, enumerable: true, configurable: true },
         });
-        mimeTypes.forEach((mt, i) => {
-            Object.defineProperty(plugin, String(i), {
+        mimes.forEach((mt, i) => {
+            Object.defineProperty(p, String(i), {
                 get: () => mt, enumerable: true, configurable: true,
             });
         });
-        return plugin;
+        return p;
     };
 
-    const pdfMime = Object.create(MimeType.prototype);
-    Object.defineProperties(pdfMime, {
-        type:        { get: () => 'application/pdf',  enumerable: true, configurable: true },
-        suffixes:    { get: () => 'pdf',              enumerable: true, configurable: true },
+    const _pdfMime = Object.create(MimeType.prototype);
+    Object.defineProperties(_pdfMime, {
+        type:        { get: () => 'application/pdf', enumerable: true, configurable: true },
+        suffixes:    { get: () => 'pdf',             enumerable: true, configurable: true },
         description: { get: () => 'Portable Document Format', enumerable: true, configurable: true },
     });
 
-    const pdfxMime = Object.create(MimeType.prototype);
-    Object.defineProperties(pdfxMime, {
+    const _pdfxMime = Object.create(MimeType.prototype);
+    Object.defineProperties(_pdfxMime, {
         type:        { get: () => 'text/pdf', enumerable: true, configurable: true },
         suffixes:    { get: () => 'pdf',      enumerable: true, configurable: true },
         description: { get: () => '',         enumerable: true, configurable: true },
     });
 
-    const chromePlugins = [
-        makePlugin('PDF Viewer',              'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
-        makePlugin('Chrome PDF Viewer',       'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
-        makePlugin('Chromium PDF Viewer',     'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
-        makePlugin('Microsoft Edge PDF Viewer','Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
-        makePlugin('WebKit built-in PDF',     'Portable Document Format', 'internal-pdf-viewer', [pdfMime]),
+    const _plugins = [
+        _makePlugin('PDF Viewer',               'Portable Document Format', 'internal-pdf-viewer', [_pdfMime]),
+        _makePlugin('Chrome PDF Viewer',        'Portable Document Format', 'internal-pdf-viewer', [_pdfMime]),
+        _makePlugin('Chromium PDF Viewer',      'Portable Document Format', 'internal-pdf-viewer', [_pdfMime]),
+        _makePlugin('Microsoft Edge PDF Viewer','Portable Document Format', 'internal-pdf-viewer', [_pdfMime]),
+        _makePlugin('WebKit built-in PDF',      'Portable Document Format', 'internal-pdf-viewer', [_pdfMime]),
     ];
 
     Object.defineProperty(Navigator.prototype, 'plugins', {
         get: () => {
             const list = Object.create(PluginArray.prototype);
-            chromePlugins.forEach((p, i) => {
+            _plugins.forEach((p, i) => {
                 Object.defineProperty(list, String(i), {
                     get: () => p, enumerable: true, configurable: true,
                 });
             });
             Object.defineProperty(list, 'length', {
-                get: () => chromePlugins.length, enumerable: true, configurable: true,
+                get: () => _plugins.length, enumerable: true, configurable: true,
             });
-            list.item = (i) => chromePlugins[i] || null;
-            list.namedItem = (n) => chromePlugins.find((p) => p.name === n) || null;
+            list.item = (i) => _plugins[i] || null;
+            list.namedItem = (n) => _plugins.find((p) => p.name === n) || null;
             list.refresh = () => {};
-            list[Symbol.iterator] = function* () { yield* chromePlugins; };
+            list[Symbol.iterator] = function* () { yield* _plugins; };
             return list;
         },
         configurable: true,
@@ -125,25 +129,23 @@ const STEALTH_INIT_SCRIPT = `
     });
 
     /* ==================================================================
-     * 3.  navigator.mimeTypes  →  2 PDF MIME types
+     * 3. navigator.mimeTypes → 2 PDF MIME types (main-thread only).
      * ================================================================== */
-    try { delete navigator.mimeTypes; } catch (_) {}
-
-    const mimeList = [pdfMime, pdfxMime];
+    const _mimes = [_pdfMime, _pdfxMime];
     Object.defineProperty(Navigator.prototype, 'mimeTypes', {
         get: () => {
             const list = Object.create(MimeTypeArray.prototype);
-            mimeList.forEach((m, i) => {
+            _mimes.forEach((m, i) => {
                 Object.defineProperty(list, String(i), {
                     get: () => m, enumerable: true, configurable: true,
                 });
             });
             Object.defineProperty(list, 'length', {
-                get: () => mimeList.length, enumerable: true, configurable: true,
+                get: () => _mimes.length, enumerable: true, configurable: true,
             });
-            list.item = (i) => mimeList[i] || null;
-            list.namedItem = (n) => mimeList.find((m) => m.type === n) || null;
-            list[Symbol.iterator] = function* () { yield* mimeList; };
+            list.item = (i) => _mimes[i] || null;
+            list.namedItem = (n) => _mimes.find((m) => m.type === n) || null;
+            list[Symbol.iterator] = function* () { yield* _mimes; };
             return list;
         },
         configurable: true,
@@ -151,62 +153,9 @@ const STEALTH_INIT_SCRIPT = `
     });
 
     /* ==================================================================
-     * 4.  navigator.userAgentData  →  full replacement with
-     *     "Google Chrome" brand.  Replaced at prototype level so it
-     *     works consistently and doesn't create own properties.
+     * 4. window.chrome.runtime → realistic stub (main-thread only).
      * ================================================================== */
-    const _uaMatch = navigator.userAgent.match(/Chrome\\/([\\d.]+)/);
-    const _uaFullVersion = _uaMatch ? _uaMatch[1] : '149.0.7827.55';
-    const _uaMajor = _uaFullVersion.split('.')[0];
-
-    const _brands = [
-        { brand: 'Google Chrome', version: _uaMajor },
-        { brand: 'Chromium',      version: _uaMajor },
-        { brand: 'Not_A Brand',   version: '24' },
-    ];
-
-    const _fullVersionList = [
-        { brand: 'Google Chrome', version: _uaFullVersion },
-        { brand: 'Chromium',      version: _uaFullVersion },
-        { brand: 'Not_A Brand',   version: '24.0.0.0' },
-    ];
-
-    const _uaData = {
-        brands: _brands,
-        mobile: false,
-        platform: 'Windows',
-        getHighEntropyValues(hints) {
-            const result = {
-                brands: _brands,
-                mobile: false,
-                platform: 'Windows',
-            };
-            if (!hints || !Array.isArray(hints)) return Promise.resolve(result);
-            if (hints.includes('architecture'))  result.architecture  = 'x86';
-            if (hints.includes('bitness'))       result.bitness       = '64';
-            if (hints.includes('model'))         result.model         = '';
-            if (hints.includes('platformVersion')) result.platformVersion = '15.0.0';
-            if (hints.includes('uaFullVersion')) result.uaFullVersion = _uaFullVersion;
-            if (hints.includes('fullVersionList')) result.fullVersionList = _fullVersionList;
-            return Promise.resolve(result);
-        },
-        toJSON() {
-            return { brands: _brands, mobile: false, platform: 'Windows' };
-        },
-    };
-
-    Object.defineProperty(Navigator.prototype, 'userAgentData', {
-        get: () => _uaData,
-        configurable: true,
-        enumerable: true,
-    });
-
-    /* ==================================================================
-     * 5.  window.chrome.runtime  →  realistic stub
-     * ================================================================== */
-    if (!window.chrome) {
-        window.chrome = {};
-    }
+    if (!window.chrome) window.chrome = {};
     if (!window.chrome.runtime) {
         window.chrome.runtime = {
             OnInstalledReason: {
@@ -252,20 +201,7 @@ const STEALTH_INIT_SCRIPT = `
     }
 
     /* ==================================================================
-     * 6.  permissions.query  →  return real Notification.permission
-     * ================================================================== */
-    const _origPermQuery = window.navigator.permissions?.query?.bind(
-        window.navigator.permissions
-    );
-    if (_origPermQuery) {
-        window.navigator.permissions.query = (parameters) =>
-            parameters.name === 'notifications'
-                ? Promise.resolve({ state: Notification.permission })
-                : _origPermQuery(parameters);
-    }
-
-    /* ==================================================================
-     * 7.  window.outerWidth / outerHeight  →  match screen
+     * 5. window.outerWidth / outerHeight → match screen (main-thread).
      * ================================================================== */
     Object.defineProperty(window, 'outerWidth', {
         get: () => window.screen.width,
@@ -275,24 +211,6 @@ const STEALTH_INIT_SCRIPT = `
         get: () => window.screen.height,
         configurable: true,
     });
-
-    /* ==================================================================
-     * 8.  Function.prototype.toString  →  hide patched getters
-     * ================================================================== */
-    const _nativeToString = Function.prototype.toString;
-    const _patchedFns = new Set();
-
-    // Collect references we want to mask
-    try {
-        _patchedFns.add(window.navigator.permissions.query);
-    } catch (_) {}
-
-    Function.prototype.toString = function () {
-        if (_patchedFns.has(this)) {
-            return 'function query() { [native code] }';
-        }
-        return _nativeToString.call(this);
-    };
 })();
 `;
 
@@ -413,7 +331,6 @@ function getBrowserIdleTimeoutMs(entry) {
 
 function isBrowserIdle(entry, now = Date.now()) {
     const timeout = getBrowserIdleTimeoutMs(entry);
-    // timeout === 0 disables idle closing
     if (timeout <= 0) return false;
     const lastUsedAt =
         entry.lastUsedAt || Date.parse(entry.createdAt) || 0;
@@ -479,6 +396,63 @@ async function navResult(page) {
     };
 }
 
+/* -----------------------------------------------------------------------
+ * CDP-level user-agent override.
+ *
+ * Sets userAgentMetadata at the ENGINE level via DevTools Protocol.
+ * Unlike JS-level patches, this propagates to Web Workers, iframes,
+ * service workers, and HTTP headers — eliminating the
+ * main-thread-vs-worker inconsistency that deviceandbrowserinfo detects.
+ *
+ * This is what makes navigator.userAgentData.brands show
+ * "Google Chrome" instead of just "Chromium", consistently everywhere.
+ * ----------------------------------------------------------------------- */
+async function applyCDPUserAgent(page, browserEntry) {
+    try {
+        const version = browserEntry.version;          // e.g. "149.0.7827.55"
+        const major = version.split('.')[0];           // e.g. "149"
+        const ua =
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+            'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+            'Chrome/' + version + ' Safari/537.36';
+
+        const client = await page.context().newCDPSession(page);
+
+        await client.send('Emulation.setUserAgentOverride', {
+            userAgent: ua,
+            acceptLanguage: 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+            platform: 'Win32',
+            userAgentMetadata: {
+                brands: [
+                    { brand: 'Google Chrome', version: major },
+                    { brand: 'Chromium',      version: major },
+                    { brand: 'Not_A Brand',   version: '24' },
+                ],
+                fullVersionList: [
+                    { brand: 'Google Chrome', version: version },
+                    { brand: 'Chromium',      version: version },
+                    { brand: 'Not_A Brand',   version: '24.0.0.0' },
+                ],
+                platform: 'Windows',
+                platformVersion: '15.0.0',
+                architecture: 'x86',
+                bitness: '64',
+                model: '',
+                mobile: false,
+                uaFullVersion: version,
+                wow64: false,
+            },
+        });
+
+        // Clean up CDP session when page closes
+        page.on('close', () => {
+            client.detach().catch(() => {});
+        });
+    } catch {
+        // CDP not available — context-level userAgent still applies
+    }
+}
+
 function attachPage(pageId, page, browserId, contextId) {
     if (pages.has(pageId)) {
         throw badRequest(`Page id "${pageId}" already exists`);
@@ -515,6 +489,7 @@ export async function createBrowser() {
     const entry = {
         id,
         browser,
+        version: browser.version(),   // e.g. "149.0.7827.55"
         contexts: new Map(),
         pages: new Map(),
         createdAt: new Date().toISOString(),
@@ -594,8 +569,14 @@ async function createContextInternal(browserId, contextId) {
         throw badRequest(`Context with id "${id}" already exists`);
     }
 
+    const version = browserEntry.version;
+    const ua =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/' + version + ' Safari/537.36';
+
     const context = await browserEntry.browser.newContext({
-        userAgent: REALISTIC_USER_AGENT,
+        userAgent: ua,
         viewport: REALISTIC_VIEWPORT,
         screen: { width: 1920, height: 1080 },
         locale: REALISTIC_LOCALE,
@@ -607,7 +588,7 @@ async function createContextInternal(browserId, contextId) {
         colorScheme: 'light',
     });
 
-    // Inject stealth patches before any page script runs
+    // Inject stealth patches (main-thread-only APIs)
     await context.addInitScript(STEALTH_INIT_SCRIPT);
 
     const contextEntry = {
@@ -635,10 +616,15 @@ async function getOrCreateDefaultContext(browserId) {
 /* ------------------------------- page APIs ------------------------------ */
 
 export async function newPage(browserId) {
+    const browserEntry = getBrowserEntry(browserId);
     const contextEntry = await getOrCreateDefaultContext(browserId);
     const page = await contextEntry.context.newPage();
     const pageId = crypto.randomUUID();
     attachPage(pageId, page, browserId, contextEntry.id);
+
+    // Engine-level userAgentData override (propagates to workers)
+    await applyCDPUserAgent(page, browserEntry);
+
     return { id: pageId };
 }
 
