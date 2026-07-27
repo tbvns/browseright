@@ -1,12 +1,12 @@
 """
-title: Browseright: Browser Agent
+title: Browseright Hardened Browser Agent
 author: Tbvns
-version: 0.0.2
+version: 0.0.3
 license: MIT
-description: Minimal browser automation tool. Patchright remains vanilla. All content
-processing happens server-side outside the browser. The agent cannot control contexts,
-choose IDs, or fetch raw full-page content. Large pages are forced through the embedded
-smart-context pipeline.
+description: Minimal browser automation tool with isolated VNC/NoVNC access per browser.
+Patchright remains vanilla. All content processing happens server-side outside the browser.
+The agent cannot control contexts, choose IDs, or fetch raw full-page content.
+Large pages are forced through the embedded smart-context pipeline.
 """
 
 import requests
@@ -163,16 +163,50 @@ class Tools:
 
     def create_browser(self) -> Dict[str, Any]:
         """
-        Create or reuse a managed browser instance.
+        Create a new managed browser instance with isolated VNC/NoVNC access.
         The agent cannot choose the browser ID.
-        Returns: {browserId}
+
+        Returns:
+        {
+            browserId: str,
+            displayNum: int,
+            vncPort: int,
+            novncPort: int,
+            password: str,
+            novncUrl: str
+        }
         """
-        result = self._ensure_browser()
+        resp = self._request("POST", "/api/browser", json_body={})
 
-        if isinstance(result, dict):
-            return result
+        if isinstance(resp, dict) and resp.get("error"):
+            return resp
 
-        return {"browserId": result}
+        browser_id = resp.get("id")
+        if browser_id:
+            self._default_browser_id = browser_id
+
+        # Return the full connection info provided by the new endpoint
+        return {
+            "browserId": browser_id,
+            "displayNum": resp.get("displayNum"),
+            "vncPort": resp.get("vncPort"),
+            "novncPort": resp.get("novncPort"),
+            "password": resp.get("password"),
+            "novncUrl": resp.get("novncUrl"),
+        }
+
+    def get_browser_info(self, browser_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get connection details (VNC/NoVNC) for a specific browser.
+        If browser_id is omitted, returns info for the default managed browser.
+        """
+        if not browser_id:
+            browser_id = self._default_browser_id
+
+        if not browser_id:
+            return {"error": "No browser ID provided and no default browser set"}
+
+        return self._request("GET", f"/api/browser/{browser_id}")
 
     def open_page(self, url: str, browser_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -188,10 +222,10 @@ class Tools:
             browser_id = self._default_browser_id
 
         if not browser_id:
-            created = self._ensure_browser()
-            if isinstance(created, dict):
+            created = self.create_browser()
+            if isinstance(created, dict) and created.get("error"):
                 return created
-            browser_id = created
+            browser_id = created.get("browserId")
 
         page_resp = self._request(
             "POST",
@@ -524,7 +558,11 @@ class Tools:
             return self._request(
                 "POST",
                 f"/api/page/{page_id}/wait/selector",
-                json_body={"selector": selector, "state": "visible", "timeout": timeout},
+                json_body={
+                    "selector": selector,
+                    "state": "visible",
+                    "timeout": timeout,
+                },
             )
 
         if url:
@@ -569,7 +607,9 @@ class Tools:
         if not spec or not isinstance(spec, dict):
             return {"error": "spec must be an object"}
 
-        return self._request("POST", f"/api/page/{page_id}/extract", json_body={"spec": spec})
+        return self._request(
+            "POST", f"/api/page/{page_id}/extract", json_body={"spec": spec}
+        )
 
     def close_page(self, page_id: str) -> Dict[str, Any]:
         """

@@ -120,7 +120,9 @@ class DisplayManager {
 
     async createDisplay(resolution = '1920x1080x24', customPassword = null) {
         const displayNum = await this.allocateDisplay();
-        const password = customPassword || this.generatePassword();
+
+        // If customPassword is null/undefined, generate a secure one
+        const password = customPassword ? customPassword : this.generatePassword();
 
         await this.startXvfb(displayNum, resolution);
         const vncPort = await this.startVnc(displayNum, password);
