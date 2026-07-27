@@ -118,11 +118,10 @@ class DisplayManager {
         return novncPort;
     }
 
-    async createDisplay(resolution = '1920x1080x24', customPassword = null) {
+    async createDisplay(resolution = '1920x1080x24', customPassword = undefined) {
         const displayNum = await this.allocateDisplay();
 
-        // If customPassword is null/undefined, generate a secure one
-        const password = customPassword ? customPassword : this.generatePassword();
+        const password = customPassword !== undefined ? customPassword : this.generatePassword();
 
         await this.startXvfb(displayNum, resolution);
         const vncPort = await this.startVnc(displayNum, password);

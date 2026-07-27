@@ -479,7 +479,7 @@ async function withPage(pageId, fn) {
 
 /* ----------------------------- browser APIs ----------------------------- */
 
-export async function createBrowser(customPassword = null) {
+export async function createBrowser(customPassword = undefined) {
     const id = crypto.randomUUID();
 
     const { displayNum, vncPort, novncPort, password, novncUrl } =
