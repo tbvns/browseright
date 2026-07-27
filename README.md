@@ -8,3 +8,28 @@ Open WebUI tool allowing agents to access a full web browser.
 > [!NOTE]
 > Feel free to open pull requests or fork the tool for your need. <br />
 > Vibe coding is allowed in pull requests for this repo, so go wild.
+
+# Usage
+
+### Prerequisites
+*   Node.js (v18 or higher recommended)
+*   npm or yarn
+
+### Installation Steps
+
+1.  **Clone the repository**
+    ```bash
+    git clone https://github.com/tbvns/browseright.git
+    cd browseright
+    ```
+
+2.  **Install dependencies**
+    ```bash
+    npm install
+    npx playwright install
+    ```
+
+3.  **Run the server**
+    ```bash
+    node ./main.js
+    ```
