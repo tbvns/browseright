@@ -30,7 +30,6 @@ const LAUNCH_ARGS = [
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-popup-blocking',
-    '--disable-extensions',
     '--disable-hang-monitor',
     '--disable-sync',
     '--metrics-recording-only',
