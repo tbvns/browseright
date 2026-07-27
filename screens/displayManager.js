@@ -123,7 +123,6 @@ class DisplayManager {
         return vncPort;
     }
 
-    // ── noVNC: websockify (WS proxy) + static HTTP server ──────────
     async startNoVNC(displayNum, vncPort, password, httpPort = null) {
         const novncPort = httpPort || this.nextNoVNCPort++;
 
@@ -131,15 +130,13 @@ class DisplayManager {
             throw new Error(`noVNC not found at ${this.noVNCPath}. Set NOVNC_PATH env var.`);
         }
 
-        // 1) websockify — WebSocket proxy ONLY, listen on all interfaces
         const websockify = spawn('websockify', [
-            '--listen', '0.0.0.0',       // ← bind to all interfaces
-            String(novncPort),
-            `127.0.0.1:${vncPort}`       // ← target: local VNC
+            `0.0.0.0:${novncPort}`,
+            `127.0.0.1:${vncPort}`
         ], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
         websockify.unref();
+        websockify.unref();
 
-        // Log websockify stderr for debugging
         websockify.stderr.on('data', (chunk) => {
             console.error(`[websockify :${displayNum}] ${chunk.toString().trim()}`);
         });
@@ -147,7 +144,6 @@ class DisplayManager {
             console.log(`[websockify :${displayNum}] ${chunk.toString().trim()}`);
         });
 
-        // 2) Static file server with correct MIME types
         const staticPort = novncPort + 1000;
         const staticServer = http.createServer((req, res) => {
             let urlPath = req.url.split('?')[0];
@@ -155,7 +151,6 @@ class DisplayManager {
 
             const filePath = path.join(this.noVNCPath, path.normalize(urlPath));
 
-            // Prevent directory traversal
             if (!filePath.startsWith(path.resolve(this.noVNCPath))) {
                 res.writeHead(403); res.end('Forbidden'); return;
             }
@@ -185,7 +180,6 @@ class DisplayManager {
         displayInfo.novncPort    = novncPort;
         displayInfo.staticPort   = staticPort;
 
-        // Wait for websockify to actually be listening
         await this._waitForTcpPort(novncPort);
         return { novncPort, staticPort };
     }
@@ -249,7 +243,6 @@ class DisplayManager {
         throw new Error(`X server :${displayNum} failed to start within ${timeout}ms`);
     }
 
-    // TCP connect check — more reliable than curl for websockify
     async _waitForTcpPort(port, timeout = 5000) {
         const startTime = Date.now();
         while (Date.now() - startTime < timeout) {
