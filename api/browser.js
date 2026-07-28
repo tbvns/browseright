@@ -347,6 +347,61 @@ export async function createBrowser(customPassword = undefined) {
             javaScriptEnabled: true,
             colorScheme: 'light',
         });
+
+        /* -------------------- worker navigator consistency -------------------- */
+        await context.addInitScript(() => {
+            const patch = (() => {
+                const props = {
+                    language: navigator.language,
+                    languages: navigator.languages,
+                    platform: navigator.platform,
+                    vendor: navigator.vendor,
+                    hardwareConcurrency: navigator.hardwareConcurrency,
+                    userAgent: navigator.userAgent,
+                    webdriver: navigator.webdriver,
+                };
+                for (const [k, v] of Object.entries(props)) {
+                    try {
+                        Object.defineProperty(navigator, k, {
+                            get: () => v,
+                            configurable: true,
+                            enumerable: true,
+                        });
+                    } catch (e) {}
+                }
+            }).toString();
+
+            const patchCode = `(${patch})();`;
+
+            function wrapWorker(OriginalWorker) {
+                return function (scriptURL, options) {
+                    const url = scriptURL instanceof URL ? scriptURL.href : String(scriptURL);
+                    try {
+                        const parsed = new URL(url, location.href);
+                        const isBlob = parsed.protocol === 'blob:';
+                        const isSameOrigin = parsed.origin === location.origin;
+
+                        if (isBlob || isSameOrigin) {
+                            const xhr = new XMLHttpRequest();
+                            xhr.open('GET', url, false);
+                            xhr.send();
+                            const wrapped = patchCode + '\n' + xhr.responseText;
+                            const blob = new Blob([wrapped], { type: 'application/javascript' });
+                            const blobUrl = URL.createObjectURL(blob);
+                            return new OriginalWorker(blobUrl, options);
+                        }
+                    } catch (e) {
+                        // If anything fails (CSP, cross-origin, etc.) fall back to native.
+                    }
+                    return new OriginalWorker(scriptURL, options);
+                };
+            }
+
+            window.Worker = wrapWorker(window.Worker);
+            if (window.SharedWorker) {
+                window.SharedWorker = wrapWorker(window.SharedWorker);
+            }
+        });
     } catch (err) {
         releaseProfileSlot(slot);
         await displayManager.cleanupDisplay(displayNum).catch(() => {});
