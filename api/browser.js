@@ -348,18 +348,29 @@ export async function createBrowser(customPassword = undefined) {
             colorScheme: 'light',
         });
 
-        /* -------------------- worker navigator consistency -------------------- */
         await context.addInitScript(() => {
-            const patch = (() => {
-                const props = {
-                    language: navigator.language,
-                    languages: navigator.languages,
-                    platform: navigator.platform,
-                    vendor: navigator.vendor,
-                    hardwareConcurrency: navigator.hardwareConcurrency,
-                    userAgent: navigator.userAgent,
-                    webdriver: navigator.webdriver,
-                };
+            /* ---------- 1. snapshot every navigator property from main thread ---------- */
+            const snapshot = {};
+            // all enumerable keys
+            for (const key of Object.keys(navigator)) {
+                try { snapshot[key] = navigator[key]; } catch (e) {}
+            }
+            // plus a few non-enumerable ones that detectors love to check
+            for (const key of [
+                'language','languages','platform','vendor','userAgent',
+                'hardwareConcurrency','deviceMemory','maxTouchPoints',
+                'product','productSub','pdfViewerEnabled','cookieEnabled',
+                'onLine','webdriver','clipboard','keyboard','mediaCapabilities',
+                'permissions','presentation','scheduling','storage','wakeLock',
+                'webkitTemporaryStorage'
+            ]) {
+                if (!(key in snapshot)) {
+                    try { snapshot[key] = navigator[key]; } catch (e) {}
+                }
+            }
+
+            const patchWorkerNav = (() => {
+                const props = JSON.parse(JSON.stringify(snapshot));
                 for (const [k, v] of Object.entries(props)) {
                     try {
                         Object.defineProperty(navigator, k, {
@@ -371,37 +382,75 @@ export async function createBrowser(customPassword = undefined) {
                 }
             }).toString();
 
-            const patchCode = `(${patch})();`;
+            const patchCode = `(${patchWorkerNav})();`;
 
-            function wrapWorker(OriginalWorker) {
+            /* ---------- 2. robust Worker constructor override ---------- */
+            const OriginalWorker = window.Worker;
+            const OriginalSharedWorker = window.SharedWorker;
+
+            function makeWorkerProxy(OriginalConstructor) {
                 return function (scriptURL, options) {
-                    const url = scriptURL instanceof URL ? scriptURL.href : String(scriptURL);
+                    const url = String(scriptURL);
+                    const isModule = options?.type === 'module';
+
+                    /* --- same-origin / blob: URLs → fetch, prepend patch, blob --- */
                     try {
                         const parsed = new URL(url, location.href);
-                        const isBlob = parsed.protocol === 'blob:';
-                        const isSameOrigin = parsed.origin === location.origin;
-
-                        if (isBlob || isSameOrigin) {
+                        if (parsed.protocol === 'blob:' || parsed.origin === location.origin) {
                             const xhr = new XMLHttpRequest();
                             xhr.open('GET', url, false);
                             xhr.send();
                             const wrapped = patchCode + '\n' + xhr.responseText;
                             const blob = new Blob([wrapped], { type: 'application/javascript' });
-                            const blobUrl = URL.createObjectURL(blob);
-                            return new OriginalWorker(blobUrl, options);
+                            return new OriginalConstructor(URL.createObjectURL(blob), options);
                         }
                     } catch (e) {
-                        // If anything fails (CSP, cross-origin, etc.) fall back to native.
+                        /* fall through to cross-origin proxy */
                     }
-                    return new OriginalWorker(scriptURL, options);
+
+                    /* --- cross-origin fallback: same-origin blob that imports real script --- */
+                    try {
+                        const proxy = isModule
+                            ? `${patchCode}\nimport '${url}';`
+                            : `${patchCode}\nimportScripts('${url}');`;
+                        const blob = new Blob([proxy], { type: 'application/javascript' });
+                        return new OriginalConstructor(URL.createObjectURL(blob), options);
+                    } catch (e) {
+                        /* absolute fallback (unpatched) */
+                        return new OriginalConstructor(scriptURL, options);
+                    }
                 };
             }
 
-            window.Worker = wrapWorker(window.Worker);
-            if (window.SharedWorker) {
-                window.SharedWorker = wrapWorker(window.SharedWorker);
+            window.Worker = makeWorkerProxy(OriginalWorker);
+            if (OriginalSharedWorker) {
+                window.SharedWorker = makeWorkerProxy(OriginalSharedWorker);
             }
+
+            /* ---------- 3. propagate override into existing & future iframes ---------- */
+            function patchFrame(win) {
+                try {
+                    win.Worker = window.Worker;
+                    if (OriginalSharedWorker) win.SharedWorker = window.SharedWorker;
+                } catch (e) {}
+            }
+
+            for (const f of document.querySelectorAll('iframe')) {
+                if (f.contentWindow) patchFrame(f.contentWindow);
+                f.addEventListener('load', () => patchFrame(f.contentWindow));
+            }
+
+            new MutationObserver((mutations) => {
+                for (const m of mutations) {
+                    for (const node of m.addedNodes) {
+                        if (node.tagName === 'IFRAME') {
+                            node.addEventListener('load', () => patchFrame(node.contentWindow));
+                        }
+                    }
+                }
+            }).observe(document, { childList: true, subtree: true });
         });
+
     } catch (err) {
         releaseProfileSlot(slot);
         await displayManager.cleanupDisplay(displayNum).catch(() => {});
